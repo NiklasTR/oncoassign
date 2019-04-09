@@ -1,0 +1,130 @@
+---
+title: "Dataset Export"
+author: "Niklas Rindtorff"
+date: "4/3/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(here)
+library(umap)
+```
+
+I load all the data I curated. 
+
+```{r}
+allocation <- read_csv(here("data/allocation.csv"))
+covariates <- read_csv(here("data/covariates.csv"))
+load(here("data/crxg_map_imputed.Rdata"))
+load(here("data/mutation.Rdata"))
+load(here("data/cnv.Rdata"))
+load(here("data/expression.Rdata"))
+
+# for plotting only
+load(here("data/crxg.Rdata"))
+```
+
+```{r}
+# I create a dataset X that contains recommended treatments 
+X <- mutation %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+ # inner_join(expression %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+  inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+  inner_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)))
+```
+
+```{r}
+y <- crxg_map_imputed
+```
+
+```{r}
+t <- allocation
+```
+
+# UMAP embedding 
+
+```{r}
+umap_exp <- expression %>% 
+  semi_join(allocation %>% mutate(cosmic_id = as.character(cosmic_id))) %>%
+  dplyr::select(-cosmic_id) %>% 
+  mutate_all(funs(as.numeric)) %>%
+  umap::umap()
+
+
+```
+
+
+```{r}
+df <- umap_exp$layout %>% 
+  cbind(cosmic_id = expression %>% 
+          semi_join(allocation %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+          .$cosmic_id) %>%
+  as_tibble() %>%
+  left_join(crxg %>% dplyr::select(cosmic_id, gdsc_tissue_1) %>% 
+              mutate(cosmic_id = as.character(cosmic_id))) %>%
+  distinct() %>% 
+  mutate(V1 = as.numeric(V1),
+         V2 = as.numeric(V2))
+
+df%>%
+  ggplot(aes(V1, V2, color = gdsc_tissue_1)) + 
+  geom_point() + 
+  theme_classic() + 
+  theme(legend.position = "none")
+```
+
+```{r}
+df%>%
+  ggplot(aes(V1, V2, color = gdsc_tissue_1)) + 
+  geom_point() + 
+  theme_classic() + 
+  facet_wrap(~ gdsc_tissue_1) + 
+  theme(legend.position = "none")
+```
+
+## More complex features
+
+```{r}
+umap.feature_extraction <- umap.defaults
+umap.feature_extraction$n_components <- 100
+
+umap_exp_features <- expression %>% 
+  semi_join(allocation %>% mutate(cosmic_id = as.character(cosmic_id))) %>%
+  dplyr::select(-cosmic_id) %>% 
+  mutate_all(funs(as.numeric)) %>%
+  umap::umap(config = umap.feature_extraction)
+
+df <- umap_exp_features$layout[,c(3,9)] %>%
+  cbind(cosmic_id = expression %>% 
+          semi_join(allocation %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+          .$cosmic_id) %>%
+  as_tibble() %>%
+  left_join(crxg %>% dplyr::select(cosmic_id, gdsc_tissue_1) %>% 
+              mutate(cosmic_id = as.character(cosmic_id))) %>%
+  distinct() %>% 
+  mutate(V1 = as.numeric(V1),
+         V2 = as.numeric(V2))
+
+df%>%
+  ggplot(aes(V1, V2, color = gdsc_tissue_1)) + 
+  geom_point() + 
+  theme_classic() + 
+  theme(legend.position = "none")
+```
+
+I export the 100 dimensional expression dataset.
+
+```{r}
+umap_exp_features$layout %>%
+  cbind(cosmic_id = expression %>% 
+          semi_join(allocation %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+          .$cosmic_id) %>%
+  as.data.frame() %>%
+  write_csv(path = here("data/expression_umap.csv"))
+```
+

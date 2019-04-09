@@ -1,0 +1,152 @@
+---
+title: "1_tidy_cancerrxgene_data"
+author: "Niklas Rindtorff"
+date: "3/5/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Introduction 
+#Load packages
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(stringr)
+library(janitor)
+library(here)
+library(googlesheets)
+library(ggridges)
+```
+
+#Import drug vulnerability data
+
+```{r}
+
+crxg <- read_excel(here("local_data/v17.3_fitted_dose_response.xlsx")) %>% dplyr::select(-c(1,2)) %>% `colnames<-`(colnames(.) %>% tolower()) %>%
+  full_join(., read_excel(here("local_data/Screened_Compounds.xlsx")) %>% janitor::clean_names()) %>%
+  full_join(., read_excel(here("local_data/Cell_Lines_Details.xlsx"), sheet = "Cell line details") %>% `colnames<-`(colnames(.) %>% tolower() %>% str_replace_all(., " ", "_"))  %>%  dplyr::select(c(1,2,8,9,10,11,12,13)) %>% `colnames<-`(c("sample_name", "cosmic_id", "gdsc_tissue_1", "gdsc_tissue_2", "cancer_type", "msi", "medium", "growth_properties")))
+  
+```
+
+Next, I only keep drug vulnerability information for compounds that have been studied in the NCI Match signal-finding trial or that have been covered in the MD Anderson Precision Medicine Database.
+
+```{r, message=FALSE, warning=FALSE}
+match_drugs <- read_csv(here("data/nci_match_compounds.csv"), col_names = FALSE) %>% 
+  dplyr::select(drug_name = X1) %>% 
+  mutate(drug_name = drug_name %>% tolower())
+
+mda_drugs <- read_csv(here("data/md_anderson_compounds.csv"), col_names = TRUE) %>% 
+  filter(include_1 == TRUE) %>% 
+  mutate(drug_name = drug %>% tolower()) %>% 
+  dplyr::select(drug_name)
+
+default_drugs <- c(#"paclitaxel",
+                   "cisplatin")
+
+crxg <- crxg %>% 
+  mutate(drug_name = drug_name %>% tolower()) %>% 
+  filter(drug_name %in% match_drugs$drug_name | drug_name %in% mda_drugs$drug_name | drug_name %in% default_drugs)
+  
+```
+
+
+#Scale data
+
+Now I plot the distribution of ln_ic50s for all drugs. They are all over the place.
+
+```{r}
+crxg %>% 
+  ggplot(aes(ln_ic50, group = drug_id)) + 
+  geom_density(alpha = 1, size = 0.2) + 
+  theme_classic() + 
+  labs(x = "raw ln(IC50)") + 
+  ggsave("raw_ic50.pdf", width = 3, height = 2)
+```
+
+Now I scale the ic50s to compare distributions
+
+```{r}
+crxg <- crxg %>%
+  group_by(drug_id) %>%
+  mutate(rob_z = (ln_ic50 - median(ln_ic50))/mad(ln_ic50),
+         rob_center = (ln_ic50 - median(ln_ic50)),
+         med_ln_ic50 = median(ln_ic50, na.rm = TRUE),
+         norm_ln_ic50 = ln_ic50 - med_ln_ic50)
+
+crxg %>% 
+  ggplot(aes(norm_ln_ic50, group = drug_id)) + 
+  geom_density(alpha = 1, size = 0.2) + 
+  theme_classic() + 
+  labs(x = "centered ln(IC50)") + 
+  ggsave("center_ic50.pdf", width = 3, height = 2)
+```
+
+
+#QC
+
+I wonder if there are compounds which were only seldom screened. I remove these drugs and work with the residual dataset.
+
+```{r}
+cutoff <- 850
+
+keep_drugs <-crxg %>% 
+  ungroup %>% filter(!is.na(drug_id), !is.na(cosmic_id)) %>%
+  select(cosmic_id, drug_id) %>% distinct() %>% group_by(drug_id) %>% summarise(n = n()) %>% 
+  filter(n > cutoff) %>%  
+  drop_na() %>% .$drug_id
+
+crxg %>% 
+  ungroup %>% filter(!is.na(drug_id), !is.na(cosmic_id)) %>%
+  select(cosmic_id, drug_id) %>% distinct() %>% group_by(drug_id) %>% summarise(n = n()) %>% 
+  arrange(n) %>%
+  mutate(drug_id = factor(drug_id, levels =  .$drug_id)) %>% 
+  ggplot(aes(drug_id, n)) + 
+  geom_point() + 
+  theme_classic() + 
+  #scale_y_log10() + 
+  theme(axis.text.x = element_blank()) + 
+  geom_hline(yintercept = cutoff) + 
+  ggsave("filter_drugs.pdf", width = 3, height = 2)
+```
+
+I overwrite the original object after QC. 
+
+```{r}
+crxg <- crxg %>% 
+  ungroup %>% filter(!is.na(drug_id), !is.na(cosmic_id), drug_id %in% keep_drugs)
+```
+
+I extract covariates for the cell lines and export them
+
+```{r}
+covariates <- crxg %>% 
+  dplyr::select(cosmic_id, gdsc_tissue_2, msi, medium, growth_properties) %>% 
+  distinct() %>%
+  mutate(medium = factor(medium) %>% as.numeric(),
+         medium = medium -1,
+         msi = factor(msi) %>% as.numeric(),
+         msi = msi-1, 
+         growth_properties = factor(growth_properties),
+         gdsc_tissue_2 = factor(gdsc_tissue_2)) %>% 
+  mutate(value = 1) %>%
+  spread(gdsc_tissue_2, value, fill = 0) %>% 
+  mutate(value = 1) %>%
+  spread(growth_properties, value, fill = 0) %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(-na) %>% 
+  replace_na(list(msi = 1))
+  
+write_csv(covariates, here("data/covariates.csv")) 
+```
+
+Finally, I save my result for further analysis
+
+```{r}
+save(crxg, file = here("data/crxg.Rdata"))
+```
+
+

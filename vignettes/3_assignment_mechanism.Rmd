@@ -1,0 +1,82 @@
+---
+title: "subtype_specific_anaysis"
+author: "Niklas Rindtorff"
+date: "5/13/2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+#Introduction 
+
+I want to simulate the current inclusion criteria into NCI Match. 
+
+#Load packages
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(here)
+```
+
+# Import data
+
+```{r}
+load(here("data/crxg.Rdata"))
+load(here("data/crxg_map.Rdata"))
+```
+
+# Read molecular data
+
+I create a large object for every cell line that contains the genomic features.
+
+```{r, message=FALSE, warning=FALSE}
+expression <- read_delim(here("local_data/sanger1018_brainarray_ensemblgene_rma.txt"), 
+    "\t", escape_double = FALSE, trim_ws = TRUE)%>% 
+  as.matrix() %>%
+  t() %>% 
+  as.data.frame() %>% 
+  magrittr::set_colnames(.[1,] %>% unlist() %>% as.character()) %>% 
+  rownames_to_column("cosmic_id") %>% 
+  .[-1,]
+
+```
+
+
+I import genetic data as well. This is the most relevant feature for patient allocation. 
+
+```{r, warning=FALSE, message=FALSE}
+mutation <- read_delim("local_data/CellLines_CG_BEMs/PANCAN_SEQ_BEM.txt", 
+    "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  as.matrix() %>%
+  t() %>% 
+  as.data.frame() %>% 
+  magrittr::set_colnames(.[1,] %>% unlist() %>% as.character()) %>% 
+  rownames_to_column("cosmic_id") %>% 
+  .[-1,]
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+cnv <- read_delim(here("local_data/CellLine_CNV_BEMs/PANCAN_CNA_BEM.rdata.txt"), 
+    "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  as.matrix() %>%
+  t() %>% 
+  as.data.frame() %>% 
+  magrittr::set_colnames(.[1,] %>% unlist() %>% as.character()) %>% 
+  rownames_to_column("cosmic_id") %>% 
+  .[-1,]
+```
+
+
+```{r}
+#tmp <- left_join(expression, mutation, by = "cosmic_id")
+
+#tmp %>% naniar::vis_miss(warn_large_data = FALSE)
+```
+

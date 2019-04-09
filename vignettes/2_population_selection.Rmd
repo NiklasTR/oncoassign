@@ -1,0 +1,277 @@
+---
+title: "pan_cancer_analysis"
+author: "Niklas Rindtorff"
+date: "5/13/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+#Introduction 
+#Load packages
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(here)
+library(viridis)
+```
+
+#Load data
+```{r}
+load(here("data/crxg.Rdata"))
+```
+
+
+#Correlation pan-cancer
+
+I show the null-distribution of drug correlations for all drugs and cell lines available.
+
+```{r}
+crxgr_pan <- crxg %>% dplyr::select(drug_id, cosmic_id, rob_z) %>%
+  filter(!is.na(drug_id), !is.na(cosmic_id)) %>%
+  spread(drug_id, rob_z) %>% 
+  dplyr::select(-cosmic_id)%>%
+  corrr::correlate(method = "spearman", use = "pairwise.complete.obs") %>%
+  corrr::stretch()
+
+crxgr_pan %>%
+  drop_na() %>%
+  ggplot(aes(r)) + 
+  geom_density() + 
+  theme_classic()
+```
+
+```{r}
+crxg_map <- crxg %>% dplyr::select(drug_id, cosmic_id, ln_ic50) %>%
+  filter(!is.na(drug_id), !is.na(cosmic_id)) %>% 
+  group_by(drug_id) %>%
+  mutate(med_ln_ic50 = median(ln_ic50, na.rm = TRUE)) %>%
+  mutate(norm_ln_ic50 = ln_ic50 - med_ln_ic50) %>%
+  ungroup() %>%
+  dplyr::select(drug_id, cosmic_id, norm_ln_ic50) %>%
+  spread(drug_id, norm_ln_ic50) %>% 
+  column_to_rownames("cosmic_id") %>% 
+  #drop_na() %>%
+  as.data.frame() 
+```
+
+# Removing duplicated drugs
+
+It turns out that the drug *Afatinib* and *Olaparib* were screened twice. We have to pick one of the datasets to continue.
+
+## Afatinib
+
+```{r}
+crxg_map %>% dplyr::select(low_dose = `1032`, high_dose = `1377`) %>% 
+  drop_na() %>%
+  ggplot(aes(low_dose, high_dose)) + 
+  geom_point(alpha = 0.3) + 
+  theme_classic() + 
+  geom_abline(slope = 1) + 
+  labs(title = "Afatinib") +
+  ggsave("afatinib_correlation.pdf", width = 3, height = 3)
+
+conc_range_afatinib <- crxg %>% 
+  filter(drug_id %in% c(1032, 1377)) %>%
+  dplyr::select(max_conc_micromolar, min_conc_micromolar, drug_id) %>% 
+  mutate(dose  = if_else(drug_id == 1032, "low_dose", "high_dose")) %>%
+  distinct() %>% 
+  mutate(max_conc_micromolar = log(max_conc_micromolar),
+         min_conc_micromolar = log(min_conc_micromolar))
+
+crxg %>% 
+  filter(drug_id %in% c(1032, 1377)) %>%
+  mutate(dose  = if_else(drug_id == 1032, "low_dose", "high_dose")) %>%
+  ggplot(aes(ln_ic50, group = drug_id, fill = dose)) + 
+  geom_density(size = 0.2, alpha = 0.5) + 
+  theme_classic() + 
+  labs(x = "raw ln(IC50)") + 
+  geom_vline(data = conc_range_afatinib, 
+             aes(xintercept=max_conc_micromolar, color=dose),
+             size = 0.5) +
+  geom_vline(data = conc_range_afatinib, 
+             aes(xintercept=min_conc_micromolar, color=dose),
+             linetype="dashed",
+             size = 0.5) + 
+  ggsave("afatinib_lnic50_range.pdf", width = 5, height = 3)
+
+```
+
+I reformat the column names after removing the low-dose *Afatinib* variable. The dose ic50 estimates are shifted towards higher values in both batches. The effect size and deviation correlates well. I end up picking the replicate with the higher number of observations.
+
+```{r}
+crxg_map <- crxg_map %>% dplyr::select(-`1032`)
+```
+
+## Olaparib 
+
+```{r}
+crxg_map %>% dplyr::select(low_dose = `1017`, high_dose = `1495`) %>% 
+  drop_na() %>%
+  ggplot(aes(low_dose, high_dose)) + 
+  geom_point(alpha = 0.3) + 
+  theme_classic() + 
+  geom_abline(slope = 1) + 
+  labs(title = "Olapraib") +
+  ggsave("olaparib_correlation.pdf", width = 3, height = 3)
+
+conc_range_olaparib <- crxg %>% 
+  filter(drug_id %in% c(1017, 1495)) %>%
+  dplyr::select(max_conc_micromolar, min_conc_micromolar, drug_id) %>% 
+  mutate(dose  = if_else(drug_id == 1017, "low_dose", "high_dose")) %>%
+  distinct() %>% 
+  mutate(max_conc_micromolar = log(max_conc_micromolar),
+         min_conc_micromolar = log(min_conc_micromolar))
+
+crxg %>% 
+  filter(drug_id %in% c(1017, 1495)) %>%
+  mutate(dose  = if_else(drug_id == 1017, "low_dose", "high_dose")) %>%
+  ggplot(aes(ln_ic50, group = drug_id, fill = dose)) + 
+  geom_density(size = 0.2, alpha = 0.5) + 
+  theme_classic() + 
+  labs(x = "raw ln(IC50)") + 
+  geom_vline(data = conc_range_afatinib, 
+             aes(xintercept=max_conc_micromolar, color=dose),
+             size = 0.5) +
+  geom_vline(data = conc_range_afatinib, 
+             aes(xintercept=min_conc_micromolar, color=dose),
+             linetype="dashed",
+             size = 0.5) + 
+  ggsave("olaparib_lnic50_range.pdf", width = 5, height = 3)
+
+```
+
+Based on this data, I decide to stick to the drug_id that covers a greater portion of the drug's ln(IC50) values. I remove the other drug_id.
+
+```{r}
+crxg_map <- crxg_map %>% dplyr::select(-`1017`)
+
+# Mapping interpretable names after removing duplicate row afatinib
+colnames(crxg_map) <- crxg %>% dplyr::select(drug_id, drug_name) %>% 
+  filter(drug_id %in% colnames(crxg_map)) %>% 
+  distinct() %>% .$drug_name
+
+save(crxg_map, file = here("data/crxg_map.Rdata"))
+```
+
+# Visualize distribution of response values.
+
+```{r}
+crxg_map %>% 
+  gather(drug_name, norm_ln_ic50) %>% 
+  drop_na() %>% 
+  mutate(drug_name = factor(drug_name)) %>%
+  ggplot(aes(y = drug_name, x = norm_ln_ic50, fill = ..x..)) + 
+  geom_density_ridges_gradient() + 
+  scale_fill_viridis(name = "Centered ln(IC50)", option = "C") + 
+  theme_ridges() + 
+  labs(x = "",
+       y = "",
+       title = "Distribution of drug responses") + 
+  ggsave("drug_response_dist.pdf", width = 5, height = 3)
+```
+
+
+# Missing values
+
+I plot missing values
+
+```{r}
+crxg_map %>%
+  naniar::vis_miss()
+```
+
+
+Without dropping NAs the dimensions are: 
+
+```{r}
+crxg_map %>% dim()
+```
+
+With dropping NAs the dimensions are: 
+
+```{r}
+crxg_map %>%
+  drop_na() %>% dim()
+```
+
+I impute missing data by setting missing values to the median response value. In our case the median response value is defined to be 0. 
+
+
+```{r}
+crxg_map_imputed <- crxg_map %>% 
+  naniar::impute_median_all() %>% 
+  as.data.frame() %>% 
+  magrittr::set_rownames(rownames(crxg_map)) %>% 
+  rownames_to_column("cosmic_id")
+
+save(crxg_map_imputed, file = here("data/crxg_map_imputed.Rdata"))
+write_csv(crxg_map_imputed, path = here("data/drug_response.csv"))
+```
+
+
+Now, I plot the data. 
+
+```{r}
+types_of_interest <- (crxg %>% 
+    drop_na() %>%
+    dplyr::select(cosmic_id, cancer_type ) %>% 
+    distinct() %>% count(cancer_type) %>% arrange(desc(n)) %>% filter(n > 30) %>% .$cancer_type)
+
+
+anno_col  = crxg %>% 
+  drop_na() %>%
+                  dplyr::select(cosmic_id, cancer_type ) %>% 
+                  distinct() %>%
+  mutate(cancer_type = if_else(cancer_type %in% types_of_interest,
+    cancer_type, 
+    "Other")) %>%
+  as.data.frame() %>%
+  remove_rownames() %>%
+ # dplyr::select(-cancer_type) %>%
+                  column_to_rownames("cosmic_id")
+
+anno_row  = crxg %>% 
+  drop_na() %>%
+                  dplyr::select(drug_name, target_pathway) %>% 
+                  distinct() %>%
+  as.data.frame() %>%
+  remove_rownames() %>%
+                  column_to_rownames("drug_name")
+
+# defining colors - always fun
+cancer_type_color <- RColorBrewer::brewer.pal(length(types_of_interest)+1, "Paired")
+names(cancer_type_color) <- c(types_of_interest, "Other")
+
+target_pathway <- RColorBrewer::brewer.pal(length(anno_row$target_pathway %>% unique()), "Set1")
+names(target_pathway) <- anno_row$target_pathway %>% unique()
+
+anno_color <- list(cancer_type = cancer_type_color,
+                   target_pathway = target_pathway)
+
+crxg_map_imputed %>%
+  dplyr::select(-cosmic_id) %>%
+  as.data.frame() %>%
+  drop_na() %>%
+  t() %>%
+  pheatmap::pheatmap(na_col = "grey", scale = "column",
+                     annotation_col = anno_col, 
+                     annotation_row = anno_row,
+                     annotation_colors = anno_color,
+                     annotation_names_row = FALSE,
+                     show_rownames = TRUE, 
+                     show_colnames = FALSE,
+                     cutree_rows = 5, 
+                     filename = "crxg_no_allocation.pdf", 
+                     width = 9, height = 4.8
+                     )
+                     
+```
+
+
+
+

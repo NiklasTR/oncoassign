@@ -1,0 +1,44 @@
+---
+title: "4_gi"
+author: "Niklas Rindtorff"
+date: "5/14/2018"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(readr)
+#library(IDmining)
+library(data.table)
+```
+
+Can we identify a set of drugs:
+* High clinical relevance 
+* Diverse set of targeted treatments
+* small set of compounds 
+
+* The vulnerability correlates with a defined sgRNA
+* 
+
+
+1. 
+```{r}
+avana_cr <- read_csv("~/combis/local_data/portal-Avana-2018-05-10.csv")
+```
+
+I transpose and reformat the dataframe for ID mapping
+
+```{r}
+DF <- avana_cr %>% t()
+
+colnames(DF) = DF[1, ] # the first row will be the header
+DF = DF[-1, ]          # removing the first row.
+
+avana_cr <- DF %>% as.data.frame() %>% mutate_all(funs(as.numeric))
+```
+
+```{r}
+
+```
+
+
