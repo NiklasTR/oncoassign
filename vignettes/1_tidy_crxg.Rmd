@@ -32,24 +32,24 @@ crxg <- read_excel(here("local_data/v17.3_fitted_dose_response.xlsx")) %>% dplyr
   
 ```
 
-Next, I only keep drug vulnerability information for compounds that have been studied in the NCI Match signal-finding trial or that have been covered in the MD Anderson Precision Medicine Database.
+I preprocess the drug names.
 
 ```{r, message=FALSE, warning=FALSE}
-match_drugs <- read_csv(here("data/nci_match_compounds.csv"), col_names = FALSE) %>% 
-  dplyr::select(drug_name = X1) %>% 
-  mutate(drug_name = drug_name %>% tolower())
-
-mda_drugs <- read_csv(here("data/md_anderson_compounds.csv"), col_names = TRUE) %>% 
-  filter(include_1 == TRUE) %>% 
-  mutate(drug_name = drug %>% tolower()) %>% 
-  dplyr::select(drug_name)
-
-default_drugs <- c(#"paclitaxel",
-                   "cisplatin")
+# match_drugs <- read_csv(here("data/nci_match_compounds.csv"), col_names = FALSE) %>% 
+#   dplyr::select(drug_name = X1) %>% 
+#   mutate(drug_name = drug_name %>% tolower())
+# 
+# mda_drugs <- read_csv(here("data/md_anderson_compounds.csv"), col_names = TRUE) %>% 
+#   filter(include_1 == TRUE) %>% 
+#   mutate(drug_name = drug %>% tolower()) %>% 
+#   dplyr::select(drug_name)
+# 
+# default_drugs <- c(#"paclitaxel",
+#                    "cisplatin")
 
 crxg <- crxg %>% 
-  mutate(drug_name = drug_name %>% tolower()) %>% 
-  filter(drug_name %in% match_drugs$drug_name | drug_name %in% mda_drugs$drug_name | drug_name %in% default_drugs)
+  mutate(drug_name = drug_name %>% tolower()) #%>% 
+ # filter(drug_name %in% match_drugs$drug_name | drug_name %in% mda_drugs$drug_name | drug_name %in% default_drugs)
   
 ```
 
@@ -142,6 +142,16 @@ covariates <- crxg %>%
   
 write_csv(covariates, here("data/covariates.csv")) 
 ```
+
+```{r}
+classes <- covariates %>% 
+  dplyr::select(-cosmic_id) %>%
+  colSums()
+  
+classes/nrow(covariates) %>% 
+  sort()
+```
+
 
 Finally, I save my result for further analysis
 
