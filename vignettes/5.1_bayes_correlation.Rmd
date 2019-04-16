@@ -1,0 +1,77 @@
+---
+title: "Bayesian Correlation"
+author: "Niklas Rindtorff"
+date: "4/15/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+source(here("../bayes/robust_correlation/rob.cor.mcmc.R"))
+
+library(rstan)    # to run the Bayesian model (stan)
+library(coda)     # to obtain HPD intervals (HPDinterval)
+library(mvtnorm)  # to generate random correlated data (rmvnorm)
+library(car) 
+library(gridExtra)
+
+
+```
+
+
+
+
+
+```{r}
+set_cppo(mode="fast")
+cor.noisy2 = rob.cor.mcmc(x.noisy)
+
+
+
+tidy_mcmc_cor <- function(var1, var2, df = crxg){
+df %>% 
+    filter(drug_id == var1 | drug_id == var2) %>% 
+    select(drug_id, cosmic_id, norm_ln_ic50) %>% 
+    spread(drug_id, norm_ln_ic50) %>% 
+  drop_na() %>% 
+  dplyr::select(-cosmic_id) %>% 
+  as.matrix() %>% 
+  rob.cor.mcmc() %>% 
+    return()
+}
+
+cor_pan_mcmc <- cor_pan[c(1,2),] %>% 
+  mutate(mcmc_cor = purrr::map2(x, y, ~ tidy_mcmc_cor(.x, .y)))
+
+cor_pan_mcmc %>% 
+  nest(-x, -y) %>%
+  mutate(r_mcmc = purrr::map(data, ~ .x$mcmc_cor$stan.rho)) %>% 
+  unnest()
+```
+
+
+
+```{r}
+df <- cor_pan %>% 
+  filter(target_pathway_x != "Other" & target_pathway_y != "Other") %>%
+  mutate(same = if_else(target_pathway_x == target_pathway_y, "same", "not_same")) %>%
+  mutate(class_pair = paste0(target_pathway_x, "_",  target_pathway_y)) %>% 
+  arrange(r)
+
+df %>% 
+  filter(same == "not_same") %>% 
+  .$r %>% quantile(probs = 0.05)
+
+df %>%
+  ggplot(aes(same, r)) + 
+  geom_jitter(width = 0.1, alpha = 0.3) + 
+  ggsignif::geom_signif(comparisons =  list(c("same", "not_same"))) + 
+  theme_classic()
+  
+```
+

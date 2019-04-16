@@ -35,12 +35,20 @@ na_zero <- function(vector){
     return()
 }
 
-grouping <- cnv %>% 
-  mutate(cosmic_id = as.character(cosmic_id)) %>%
-  semi_join(crxg %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
-  left_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
-              dplyr::select(-medium, -adherent, -semi_adherent, -suspension)) %>% 
-  left_join(mutation %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+# grouping <- cnv %>% 
+#   mutate(cosmic_id = as.character(cosmic_id)) %>%
+#   semi_join(crxg %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+#   left_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+#               dplyr::select(-medium, -adherent, -semi_adherent, -suspension)) %>% 
+#   left_join(mutation %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+#   mutate_all(funs(as.character)) %>%
+#   mutate_all(funs(as.numeric)) %>% 
+#   mutate_all(funs(na_zero))
+
+grouping <- covariates %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+              dplyr::select(-medium, -adherent, -semi_adherent, -suspension) %>%
+  semi_join(crxg %>% mutate(cosmic_id = as.character(cosmic_id)), by = "cosmic_id") %>% 
+  left_join(mutation %>% mutate(cosmic_id = as.character(cosmic_id)), by = "cosmic_id") %>% 
   mutate_all(funs(as.character)) %>%
   mutate_all(funs(as.numeric)) %>% 
   mutate_all(funs(na_zero))
@@ -70,13 +78,14 @@ grouping_order <- grouping_long %>%
 
 ```{r}
 grouping_order_f <- grouping_order %>% 
-  filter(count > 10) %>%
+  filter(percent > 2) %>%
   mutate(cnv_helper = str_count(feature, pattern = "_")) %>% 
   filter(cnv_helper != 2) %>% 
+  filter(feature != 'DDX5') %>% 
   dplyr::select(-data, -cnv_helper)
 
 grouping_order_f %>% 
-  filter(percent > 7) %>%
+  filter(percent > 2) %>%
   ggplot(aes(feature, percent)) + 
   geom_point() + 
   coord_flip() + 
@@ -85,8 +94,8 @@ grouping_order_f %>%
 
 ```{r}
 features <- c(grouping_order_f %>% 
-                filter(feature != 'HLA-A') %>% 
-                filter(feature != 'DDX5') %>% 
+                 
+                
                 filter(feature != 'HSPA8') %>% 
                 .$feature %>% as.character())
 
@@ -97,10 +106,62 @@ grouping %>%
                      show_colnames = FALSE)
 ```
 
-Now, I use a function to run correlations on drug response for cell lines that are stratified by a given feature. I also add an artificial feature, that performs a pan-cancer correlation. 
+Now, I use a function to run correlations on drug response for cell lines that are stratified by a given feature. I also run a pan-cancer correlation. 
+
+I start with the pan-cancer correlation 
+
+```{r}
+pancancer_correlation <- function(drug_df, method_in = "spearman"){
+  drug_anno <- drug_df %>% dplyr::select(drug_name, drug_id, target_pathway) %>% distinct()
+  #print(feature_input)
+  
+  result <- drug_df %>%
+  #semi_join(groups %>% filter(feature == feature_input, value == 1), by = "cosmic_id") %>%
+  dplyr::select(norm_ln_ic50, drug_id, cosmic_id) %>% 
+  mutate_all(funs(na_zero)) %>%
+  spread(drug_id, norm_ln_ic50) %>%
+  dplyr::select(-cosmic_id) %>%
+  corrr::correlate(method = method_in) %>% 
+  corrr::shave() %>% 
+  corrr::stretch() %>% 
+  drop_na() %>% 
+  mutate(drug_id = x %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_x = drug_name, target_pathway_x = target_pathway) %>% 
+  mutate(drug_id = y %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_y = drug_name, target_pathway_y = target_pathway) %>% 
+  mutate(feature = "pan_cancer") 
+  
+  return(result)
+}
+
+cor_pan <- pancancer_correlation(drug_df = crxg, method_in = "pearson")
+```
+
+I create a plot of the correlation of pan-cancer vulnerabilities 
+
+```{r}
+pancancer_plot <- function(drug_df, method_in = "spearman"){
+
+  result <- drug_df %>%
+  #semi_join(groups %>% filter(feature == feature_input, value == 1), by = "cosmic_id") %>%
+  dplyr::select(norm_ln_ic50, drug_id, cosmic_id) %>% 
+  mutate_all(funs(na_zero)) %>%
+  spread(drug_id, norm_ln_ic50) %>%
+  dplyr::select(-cosmic_id) %>% 
+    cor(method = method_in, use = "pairwise.complete.obs") %>% 
+    pheatmap::pheatmap()
+}
+
+pancancer_plot(drug_df = crxg, method_in = "pearson")
+```
+
 
 ```{r, eval = FALSE}
-iterate_correlation <- function(feature_input, drug_df, groups){
+iterate_correlation <- function(feature_input, drug_df, groups, method_in = "spearman"){
   drug_anno <- drug_df %>% dplyr::select(drug_name, drug_id, target_pathway) %>% distinct()
   print(feature_input)
   
@@ -110,7 +171,7 @@ iterate_correlation <- function(feature_input, drug_df, groups){
   mutate_all(funs(na_zero)) %>%
   spread(drug_id, norm_ln_ic50) %>%
   dplyr::select(-cosmic_id) %>%
-  corrr::correlate(method = "spearman") %>% 
+  corrr::correlate(method = method_in) %>% 
   corrr::shave() %>% 
   corrr::stretch() %>% 
   drop_na() %>% 
@@ -128,7 +189,7 @@ iterate_correlation <- function(feature_input, drug_df, groups){
 }
 
 cor_iter <- features %>% 
-  lapply(iterate_correlation, drug_df = crxg, groups = grouping_long)
+  lapply(iterate_correlation, drug_df = crxg, groups = grouping_long, method_in = "pearson")
   #parallel::mclapply(iterate_correlation, drug_df = crxg, groups = grouping_long)
 
 cor_iter_df <- cor_iter %>% bind_rows()
@@ -144,6 +205,27 @@ cor_iter_df_f <- cor_iter_df %>%
   dplyr::select(feature, percent_feature = percent)) %>% 
   mutate(log_percent_feature = log(percent_feature))
 ```
+
+```{r}
+plot_correlation<- function(var1, var2, df = crxg){
+  df %>% 
+    filter(drug_id == var1 | drug_id == var2) %>% 
+    select_(.dots = c("drug_id", "cosmic_id", "norm_ln_ic50")) %>% 
+    spread(drug_id, norm_ln_ic50) %>% 
+    magrittr::set_colnames(c("cosmic_id", "drug_1", "drug_2")) %>%
+    ggplot(aes(drug_1, drug_2)) +
+      geom_point() + 
+      theme_classic() + 
+    labs()
+}
+
+plot_correlation(var1 = 272, var2 =274)
+
+plot_correlation(var1 = 326, var2 =1526)
+
+plot_correlation(var1 = 133, var2 =134)
+```
+
 
 I determine the percentage of available drug response data and add it to the model. 
 
@@ -175,6 +257,7 @@ I am interested in the effect of the feature abundance on the correlation coeffi
 ```{r}
 cor_iter_df_fd %>% 
   sample_frac(0.01) %>%
+  filter(percent_feature > 2) %>%
   ggplot(aes(percent_feature, r)) + 
   geom_point(alpha = 0.8) + 
   theme_bw() + 
@@ -183,43 +266,6 @@ cor_iter_df_fd %>%
 ```
 
 
-```{r}
-source(here("../bayes/robust_correlation/rob.cor.mcmc.R"))
-
-library(rstan)    # to run the Bayesian model (stan)
-library(coda)     # to obtain HPD intervals (HPDinterval)
-library(mvtnorm)  # to generate random correlated data (rmvnorm)
-library(car) 
-
-
-```
-
-```{r}
-sigma = c(20, 40)
-rho = -0.95
-cov.mat = matrix(c(sigma[1] ^ 2,
-                   sigma[1] * sigma[2] * rho,
-                   sigma[1] * sigma[2] * rho,
-                   sigma[2] ^ 2),
-                 nrow=2, byrow=T)
-
-set.seed(210191)
-x.clean = rmvnorm(n=400, sigma=cov.mat)
-#plot(x.clean, pch=16)
-x.noisy = x.clean
-x.noisy[1:3,] = matrix(c(-40, -60,
-                         20, 100,
-                         40, 40),
-                       nrow=3, byrow=T)
-plot(x.noisy, pch=16)
-```
-
-```{r}
-cor.noisy2 = rob.cor.mcmc(x.noisy)
-```
-```{r}
-cor.noisy2 = rob.cor.mcmc(x.noisy)
-```
 
 
 ```{r}
@@ -235,12 +281,6 @@ cor_iter_df_fd %>%
 ```
 
 
-
-# Empirical Bayes analysis of correlation 
-
-```{r}
-library()
-```
 
 
 ## Drug class correlatio
