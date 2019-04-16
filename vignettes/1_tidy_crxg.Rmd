@@ -82,7 +82,7 @@ crxg %>%
   geom_density(alpha = 1, size = 0.2) + 
   theme_classic() + 
   labs(x = "centered ln(IC50)") + 
-  ggsave("center_ic50.pdf", width = 3, height = 2)
+  ggsave("center_ic50.png", width = 3, height = 3)
 ```
 
 

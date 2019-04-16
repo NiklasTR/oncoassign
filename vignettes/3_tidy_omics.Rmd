@@ -22,6 +22,9 @@ I want to simulate the current inclusion criteria into NCI Match.
 library(tidyverse)
 library(stringr)
 library(here)
+library(umap)
+
+covariates <- read_csv(here("data/covariates.csv"))
 ```
 
 
@@ -72,4 +75,39 @@ write_csv(cnv, path = here("data/cnv.csv"))
 ```
 
 
+# UMAP 
+
+```{r}
+umap_cnv_mut <- cnv %>% 
+  mutate(cosmic_id = as.character(cosmic_id)) %>%
+  left_join(mutation) %>% 
+  semi_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id))) %>%
+  dplyr::select(-cosmic_id) %>%
+  mutate_all(funs(as.character)) %>%
+  mutate_all(funs(as.numeric)) %>% 
+  drop_na() %>%
+  as.matrix() %>% 
+  umap::umap()
+```
+
+
+```{r, eval = FALSE}
+
+umap_cnv_mut$layout %>% 
+  cbind(cnv %>% 
+  mutate(cosmic_id = as.character(cosmic_id)) %>%
+  left_join(mutation) %>% 
+  left_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+              dplyr::select(-msi, -medium, -adherent, -semi_adherent, -suspension) %>% 
+              gather(tissue, present, -cosmic_id) %>% 
+              filter(present == 1) %>% 
+              select(-present)) %>%
+    drop_na()) %>% 
+  as_tibble() %>% 
+  janitor::clean_names() %>%
+  ggplot(aes(x1, x2, color = tissue)) + 
+  geom_point()  + 
+  facet_wrap(~ tissue)
+  
+```
 

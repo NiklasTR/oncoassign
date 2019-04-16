@@ -45,11 +45,16 @@ Previously, this data has been used to find predictive models to link genetic ma
 
 ## Part 2:
 
-Next, you’ll get your hands dirty with the data:
+I downloaded the respective tables and preprocessed the drug response data by log transforming and median centering IC50 values for each drug over every cell line. By transforming IC50 values this way, we can compare drug effects between both cell lines and drugs. 
 
-Download the data and explore it.
-Think of a research question you could answer using the data – the question could be an informatics question, or it could be a clinical or biological question. Try to avoid trivial questions – do your best to make it interesting, and definitely try to ask a question that involves several different variables and some thoughtful analysis.
-Answer your research question using your techniques we covered in class. At a minimum, you should:
+![Distribution of log(IC50) values after centering](center_ic50.png)
+
+Prior studies in mouse models of epithelial cancers suggests, that the main driver of superiority of combination cancer therapy over single-agent regimen is not biochemical synergy between agents, but an increased probability of either one of the agents causing a therapeutic effect in a patient's disease. According to this theory, combination treatments with agents that have anti-correlated response profiles are interesting candidate compound for further clinical evaluation. In their original study the authors demonstrate that in fact the majoarity of currently administred combination treatments in oncology are not positiviely correlated. 
+
+In this study, my goal is to identify new potential combinations of therapeutics that are anticorrelated. Because oncology today is a highly specialized field, it is not sufficient to only identify compounds that are anti-correlated from a pan-cancer perspective. Instead, I will run multiple correlation analysis on subsets of cancer cell lines defined by tissue of origin or mutation status. Because, the estimation of correlation coefficients is not stable with different numbers of samples and subsetting of the dataset leads to very small subgroups, I have to introduce methods to estimate the credible intervals of correlation coefficients.
+
+![Increased variance of correlation coefficients as subgroup size decreases]()
+
 Visualize key variables
 Use a supervised or unsupervised machine learning method to explore a question
 Do (at least) one of the following:

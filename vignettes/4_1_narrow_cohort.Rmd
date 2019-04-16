@@ -85,11 +85,14 @@ grouping_order_f <- grouping_order %>%
   dplyr::select(-data, -cnv_helper)
 
 grouping_order_f %>% 
-  filter(percent > 2) %>%
+  #filter(percent > 2) %>%
   ggplot(aes(feature, percent)) + 
   geom_point() + 
   coord_flip() + 
-  theme_classic()
+  theme_classic() + 
+  scale_y_log10() + 
+  labs(y = "Percent size of smallest group") +
+  ggsave("features.pdf", width = 3, height = 3)
 ```
 
 ```{r}
