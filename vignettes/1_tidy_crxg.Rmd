@@ -143,15 +143,6 @@ covariates <- crxg %>%
 write_csv(covariates, here("data/covariates.csv")) 
 ```
 
-```{r}
-classes <- covariates %>% 
-  dplyr::select(-cosmic_id) %>%
-  colSums()
-  
-classes/nrow(covariates) %>% 
-  sort()
-```
-
 
 Finally, I save my result for further analysis
 
