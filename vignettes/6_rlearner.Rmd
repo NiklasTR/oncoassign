@@ -17,7 +17,9 @@ library(randomizr)
 ```{r}
 allocation <- read_csv(here("data/allocation.csv"))
 load(here("data/crxg_map_imputed.Rdata"))
+X <- readRDS(here("data/X.Rds"))
 ```
+
 
 
 The R-Learner is per default designed to evaluate the CATE of binary treatments. That means, a unit is either treated with a control of an intervention. In our case, we will define a central control arm, Cisplatin, which is commonly used in cases in which no further information about a malignant tumor is available (CUP Syndrome). 

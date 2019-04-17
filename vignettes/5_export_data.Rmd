@@ -36,6 +36,8 @@ X <- mutation %>% mutate(cosmic_id = as.character(cosmic_id)) %>%
  # inner_join(expression %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
   inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
   inner_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)))
+
+saveRDS(X, here("data/X.Rds"))
 ```
 
 ```{r}

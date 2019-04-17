@@ -12,6 +12,9 @@ knitr::opts_chunk$set(echo = TRUE)
 ## R Markdown
 
 ```{r}
+library(here)
+library(tidyverse)
+
 source(here("../bayes/robust_correlation/rob.cor.mcmc.R"))
 
 library(rstan)    # to run the Bayesian model (stan)
@@ -19,21 +22,68 @@ library(coda)     # to obtain HPD intervals (HPDinterval)
 library(mvtnorm)  # to generate random correlated data (rmvnorm)
 library(car) 
 library(gridExtra)
+library(furrr)
 
+library(microbenchmark)
 
+rstan_options(auto_write = TRUE)
+
+cor_iter_df_fd <- readRDS(here("data/cor_iter_df_fd.Rds"))
+cor_pan <- readRDS(here("data/cor_pan.Rds"))
+load(here("data/crxg.Rdata"))
+```
+
+Define STAN model 
+
+```{r}
+# Stan model definition
+  stan.model = "
+  data {
+  int<lower=1> N;  // number of observations
+  vector[2] x[N];  // input data: rows are observations, columns are the two variables
+  }
+  
+  parameters {
+  vector[2] mu;                 // locations of the marginal t distributions
+  real<lower=0> sigma[2];       // scales of the marginal t distributions
+  real<lower=1> nu;             // degrees of freedom of the marginal t distributions
+  real<lower=-1, upper=1> rho;  // correlation coefficient
+  }
+  
+  transformed parameters {
+  // Covariance matrix
+  cov_matrix[2] cov = [[      sigma[1] ^ 2       , sigma[1] * sigma[2] * rho],
+  [sigma[1] * sigma[2] * rho,       sigma[2] ^ 2       ]];
+  }
+  
+  model {
+  // Likelihood
+  // Bivariate Student's t-distribution instead of normal for robustness
+  x ~ multi_student_t(nu, mu, cov);
+  
+  // Noninformative priors on all parameters
+  sigma ~ normal(0, 1000);
+  mu ~ normal(0, 1000);
+  nu ~ gamma(2, 0.1);
+  }
+  
+  generated quantities {
+  // Random samples from the estimated bivariate t-distribution (for assessment of fit)
+  vector[2] x_rand;
+  x_rand = multi_student_t_rng(nu, mu, cov);
+  }"
+```
+
+```{r}
+correlation_model <- stan_model(model_code = stan.model,
+                                model_name="robust_correlation")
 ```
 
 
 
 
-
 ```{r}
-set_cppo(mode="fast")
-cor.noisy2 = rob.cor.mcmc(x.noisy)
-
-
-
-tidy_mcmc_cor <- function(var1, var2, df = crxg){
+tidy_mcmc_cor <- function(var1, var2, df = crxg, model_in = correlation_model){
 df %>% 
     filter(drug_id == var1 | drug_id == var2) %>% 
     select(drug_id, cosmic_id, norm_ln_ic50) %>% 
@@ -41,20 +91,38 @@ df %>%
   drop_na() %>% 
   dplyr::select(-cosmic_id) %>% 
   as.matrix() %>% 
-  rob.cor.mcmc() %>% 
+  rob.cor.mcmc(model = model_in) %>% 
     return()
 }
 
-cor_pan_mcmc <- cor_pan[c(1,2),] %>% 
-  mutate(mcmc_cor = purrr::map2(x, y, ~ tidy_mcmc_cor(.x, .y)))
+```
 
-cor_pan_mcmc %>% 
-  nest(-x, -y) %>%
-  mutate(r_mcmc = purrr::map(data, ~ .x$mcmc_cor$stan.rho)) %>% 
-  unnest()
+I start a benchmark. 
+
+```{r, eval = FALSE}
+mcmc_benchmark <- microbenchmark(
+cor_pan_mcmc <- cor_pan[c(1:2),] %>% 
+  mutate(mcmc_cor = furrr::future_map2(x, y, ~ tidy_mcmc_cor(.x, .y))), 
+times = 1
+)
 ```
 
 
+With the current settings, the inference on a single feature split would take 52 hours. I try to speed things up a bit. 
+
+```{r, eval = FALSE}
+plan(multiprocess)
+
+mcmc_benchmark_parallel <- microbenchmark(
+cor_pan_mcmc <- cor_pan[c(1:20),] %>% 
+  mutate(mcmc_cor = furrr::future_map2(x, y, ~ tidy_mcmc_cor(.x, .y)), .progress = TRUE),
+times = 1
+)
+```
+
+By using the *futures* package, I can accelerate the sampling to 1.75 seconds per job, reducing the full correlation to ~10h per split. 
+
+I need to further speed things up. I limit my bayesian inference only to pairs that are amongst the lowest 5% of each splits distribution.
 
 ```{r}
 df <- cor_pan %>% 
@@ -73,5 +141,89 @@ df %>%
   ggsignif::geom_signif(comparisons =  list(c("same", "not_same"))) + 
   theme_classic()
   
+```
+
+With this change, a single split should be evaluated in around 40 minutes. When running the whole analysis on multiple splits, this amounts to less than 40h of computation.
+
+I start out with the pan-cancer inference:
+
+```{r, eval = FALSE}
+plan(multiprocess)
+r_cut <- cor_pan$r %>% quantile(probs = 0.05) %>% as.numeric()
+
+cor_pan_mcmc <- cor_pan %>% 
+  filter(r <= r_cut) %>%
+  mutate(mcmc_cor = furrr::future_map2(x, y, ~ tidy_mcmc_cor(.x, .y)))
+
+saveRDS(cor_pan_mcmc, here("data/cor_pan_mcmc.Rds"))
+```
+
+Running this split took 25 minutes for ~ 1000 correlations. 
+
+I perform some QC
+
+```{r}
+cor_pan_mcmc <- readRDS(here("data/cor_pan_mcmc.Rds"))
+
+cor_pan_mcmc %>% 
+  mutate(hpd95 = purrr::map(mcmc_cor, ~ .x$hpd95 %>% as_tibble),
+         mu = purrr::map(mcmc_cor, ~ .x$stan.rho %>% as.numeric %>% mean())) %>% 
+  unnest(hpd95, mu) %>% 
+  mutate(delta = upper-lower) %>%
+  ggplot(aes(r, mu)) + 
+  geom_point() + 
+  theme_classic()
+```
+
+
+Now I build a function to estimate coefficients for other splits, too. 
+
+```{r}
+grouping_long <- readRDS(here("data/grouping_long.Rds"))
+
+
+tidy_mcmc_cor_feature <- function(var12,
+                                  feature_input,
+                                  groups = grouping_long,  
+                                  df = crxg, model_in = correlation_model){
+  #cheap workaround
+  var <- var12 %>% stringr::str_split(pattern = "_") %>% unlist()
+  
+df %>% 
+    semi_join(groups %>% filter(feature == feature_input, value == 1), by = "cosmic_id") %>% 
+    filter(drug_id == var[1] | drug_id == var[2]) %>% 
+    select(drug_id, cosmic_id, norm_ln_ic50) %>% 
+    spread(drug_id, norm_ln_ic50) %>% 
+  drop_na() %>% 
+  dplyr::select(-cosmic_id) %>% 
+  as.matrix() %>% 
+  rob.cor.mcmc(model = model_in) %>% 
+    return()
+}
+
+
+
+```
+
+
+```{r}
+cor_iter_mcmc <- cor_iter_df_fd %>%
+  left_join(cor_iter_df_fd %>% group_by(feature) %>% summarise(cut = quantile(r, probs = 0.05))) %>% 
+  filter(r <= cut) %>%
+  mutate(xy = paste0(x, "_", y)) %>%
+  mutate(mcmc_cor = furrr::future_map2(xy, feature, ~ tidy_mcmc_cor_feature(.x, .y)))
+```
+
+
+```{r}
+cor_iter_mcmc %>% 
+  mutate(hpd95 = purrr::map(mcmc_cor, ~ .x$hpd95 %>% as_tibble),
+         mu = purrr::map(mcmc_cor, ~ .x$stan.rho %>% as.numeric %>% mean())) %>% 
+  unnest(hpd95, mu) %>% 
+  mutate(delta = upper-lower) %>%
+  ggplot(aes(r, mu)) + 
+  geom_point() + 
+  theme_classic() + 
+  geom_abline(slope = 1)
 ```
 

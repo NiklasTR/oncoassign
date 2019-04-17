@@ -73,6 +73,8 @@ grouping_order <- grouping_long %>%
   mutate(percent = round(100*(count/n_total), 2)) %>% 
   arrange((percent)) %>% 
   mutate(feature = factor(feature) %>% fct_inorder())
+
+saveRDS(grouping_long, here("data/grouping_long.Rds"))
 ```
 
 
@@ -142,6 +144,7 @@ pancancer_correlation <- function(drug_df, method_in = "spearman"){
 }
 
 cor_pan <- pancancer_correlation(drug_df = crxg, method_in = "pearson")
+saveRDS(cor_pan, here("data/cor_pan.Rds"))
 ```
 
 I create a plot of the correlation of pan-cancer vulnerabilities 
@@ -254,6 +257,13 @@ cor_iter_df_fd <- cor_iter_df_f %>%
   select(-drug_id, percent_drug_y = percent_drug)
   
 ```
+
+I save the current object. 
+
+```{r}
+saveRDS(cor_iter_df_fd, here("data/cor_iter_df_fd.Rds"))
+```
+
 
 I am interested in the effect of the feature abundance on the correlation coefficients. 
 
