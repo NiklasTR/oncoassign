@@ -1,0 +1,537 @@
+---
+title: "4.1_narrow_cohort"
+author: "Niklas Rindtorff"
+date: "4/15/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(here)
+```
+
+# Import data
+
+```{r}
+load(here("data/crxg.Rdata"))
+load(here("data/mutation.Rdata"))
+load(here("data/cnv.Rdata"))
+covariates <- read_csv(here("data/covariates.csv"))
+```
+
+# Select subgroups
+
+```{r}
+na_zero <- function(vector){
+  tibble(vector) %>% 
+    mutate(imputed = if_else(is.na(vector), 0, vector)) %>% 
+    .$imputed %>% 
+    return()
+}
+
+# grouping <- cnv %>% 
+#   mutate(cosmic_id = as.character(cosmic_id)) %>%
+#   semi_join(crxg %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+#   left_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+#               dplyr::select(-medium, -adherent, -semi_adherent, -suspension)) %>% 
+#   left_join(mutation %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+#   mutate_all(funs(as.character)) %>%
+#   mutate_all(funs(as.numeric)) %>% 
+#   mutate_all(funs(na_zero))
+
+grouping <- covariates %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+              dplyr::select(-medium, -adherent, -semi_adherent, -suspension) %>%
+  semi_join(crxg %>% mutate(cosmic_id = as.character(cosmic_id)), by = "cosmic_id") %>% 
+  left_join(mutation %>% mutate(cosmic_id = as.character(cosmic_id)), by = "cosmic_id") %>% 
+  mutate_all(funs(as.character)) %>%
+  mutate_all(funs(as.numeric)) %>% 
+  mutate_all(funs(na_zero))
+```
+
+I identified 786 features which can be used to classify cell lines. 
+
+
+```{r}
+n_total <- nrow(grouping)
+
+grouping_long <- grouping %>% 
+  mutate_all(funs(as.character)) %>%
+  mutate_all(funs(as.numeric)) %>%
+  gather(feature, value, -cosmic_id)
+  
+grouping_order <- grouping_long %>% 
+  count(feature, value) %>% 
+  nest(-feature) %>% 
+  mutate(count = purrr::map(data, ~ min(.x$n))) %>% 
+  unnest(count) %>% 
+  mutate(percent = round(100*(count/n_total), 2)) %>% 
+  arrange((percent)) %>% 
+  mutate(feature = factor(feature) %>% fct_inorder())
+
+saveRDS(grouping_long, here("data/grouping_long.Rds"))
+```
+
+
+```{r}
+grouping_order_f <- grouping_order %>% 
+  filter(percent > 2) %>%
+  mutate(cnv_helper = str_count(feature, pattern = "_")) %>% 
+  filter(cnv_helper != 2) %>% 
+  filter(feature != 'DDX5') %>% 
+  dplyr::select(-data, -cnv_helper)
+
+grouping_order_f %>% 
+  #filter(percent > 2) %>%
+  ggplot(aes(feature, percent)) + 
+  geom_point() + 
+  coord_flip() + 
+  theme_classic() + 
+  scale_y_log10() + 
+  labs(y = "Percent size of smallest group") +
+  ggsave("features.pdf", width = 3, height = 3)
+```
+
+```{r}
+features <- c(grouping_order_f %>% 
+                 
+                
+                filter(feature != 'HSPA8') %>% 
+                .$feature %>% as.character())
+
+grouping %>% 
+  dplyr::select(-cosmic_id) %>%
+  dplyr::select_(.dots = features) %>%
+  pheatmap::pheatmap(show_rownames = FALSE,
+                     show_colnames = FALSE)
+```
+
+Now, I use a function to run correlations on drug response for cell lines that are stratified by a given feature. I also run a pan-cancer correlation. 
+
+I start with the pan-cancer correlation 
+
+```{r}
+pancancer_correlation <- function(drug_df, method_in = "spearman"){
+  drug_anno <- drug_df %>% dplyr::select(drug_name, drug_id, target_pathway) %>% distinct()
+  #print(feature_input)
+  
+  result <- drug_df %>%
+  #semi_join(groups %>% filter(feature == feature_input, value == 1), by = "cosmic_id") %>%
+  dplyr::select(norm_ln_ic50, drug_id, cosmic_id) %>% 
+  mutate_all(funs(na_zero)) %>%
+  spread(drug_id, norm_ln_ic50) %>%
+  dplyr::select(-cosmic_id) %>%
+  corrr::correlate(method = method_in) %>% 
+  corrr::shave() %>% 
+  corrr::stretch() %>% 
+  drop_na() %>% 
+  mutate(drug_id = x %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_x = drug_name, target_pathway_x = target_pathway) %>% 
+  mutate(drug_id = y %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_y = drug_name, target_pathway_y = target_pathway) %>% 
+  mutate(feature = "pan_cancer") 
+  
+  return(result)
+}
+
+cor_pan <- pancancer_correlation(drug_df = crxg, method_in = "pearson")
+saveRDS(cor_pan, here("data/cor_pan.Rds"))
+```
+
+I am also interested in the significance of the correaltion test. 
+
+```{r}
+library(psych)
+library(gtools)
+
+
+pancancer_correlation_test <- function(drug_df, method_in = "pearson"){
+  drug_anno <- drug_df %>% dplyr::select(drug_name, drug_id, target_pathway) %>% distinct()
+  #print(feature_input)
+  
+  result <- drug_df %>%
+  #semi_join(groups %>% filter(feature == feature_input, value == 1), by = "cosmic_id") %>%
+  dplyr::select(norm_ln_ic50, drug_id, cosmic_id) %>% 
+  mutate_all(funs(na_zero)) %>%
+  spread(drug_id, norm_ln_ic50) %>%
+  dplyr::select(-cosmic_id) %>%
+  psych::corr.test(adjust = "holm", method=method_in)
+  
+  #bind r
+  result_anno <- result$r[result$r %>%
+    lower.tri(diag = FALSE)] %>% 
+    cbind(combn(row.names(result$r), 2) %>% t() %>% as.data.frame()) %>% 
+    as_tibble() %>%
+  drop_na() %>% 
+  magrittr::set_colnames(c("r", "x", "y")) %>%
+    left_join(.,
+  #bind p
+  result$p[result$p %>%
+    lower.tri(diag = FALSE)] %>% 
+    cbind(combn(row.names(result$p), 2) %>% t() %>% as.data.frame()) %>% 
+    as_tibble() %>%
+  drop_na() %>% 
+  magrittr::set_colnames(c("fwer", "x", "y"))) %>%
+  mutate(fwer_log = log(fwer)) %>%
+  mutate(drug_id = x %>% as.character() %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_x = drug_name, target_pathway_x = target_pathway) %>% 
+  mutate(drug_id = y %>% as.character() %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_y = drug_name, target_pathway_y = target_pathway) %>% 
+  mutate(feature = "pan_cancer") %>% 
+    mutate(x = x %>% as.character() %>% as.numeric()) %>% 
+    mutate(y = y %>% as.character() %>% as.numeric())
+  
+  return(result_anno)
+}
+
+cor_pan_test <- pancancer_correlation_test(drug_df = crxg, method_in = "pearson")
+saveRDS(cor_pan_test, here("data/cor_pan_test.Rds"))
+```
+
+```{r}
+cor_pan_test %>% 
+  mutate(significant = fwer < 10E-3) %>%
+  ggplot(aes(r, fill = significant)) + 
+  geom_histogram(alpha = 0.4, position = "identity") + 
+  theme_classic() + 
+  scale_fill_brewer(type = "qual") + 
+  labs(title = "Correlation of drug-drug pairs",
+       subtitle = "pairwise pearson correlation",
+       fill = "FWER < 10E-3",
+       caption = ">20E4 drug-drug pairs across all celllines") + 
+  ggsave("pan_cancer_r_hist.png", width = 5, height =3.5)
+```
+
+What pairs are the pan-cancer hits?
+
+```{r}
+cor_pan_test %>% 
+  mutate(significant = fwer < 10E-3) %>% 
+  arrange(r) %>% 
+  filter(significant == TRUE, r < 0)
+
+```
+
+
+Next, we run a chi-square test to identify significantly enriched mechanisms of action. In order to identify an informative grouping, I have to explore the annotation of the drug response dataset. Every drug has a unique set of putatitive targets. I need to identify an enrichment test that respects this bag-of-word approach.
+
+First, I run a chi-square test on the drug names themsel
+
+```{r}
+library(ggrepel)
+
+chisq_drug <- cor_pan_test %>% 
+  mutate(significant = fwer < 10E-3 & r < 0) %>% 
+  dplyr::select(drug_name_x,drug_name_y,significant) %>% 
+  gather(index, drug, -significant) %>% 
+  count(drug, significant) %>% arrange(drug) %>% 
+  spread(significant, n, fill = 0) %>% 
+  janitor::clean_names() %>% 
+  as.data.frame() %>% 
+  tibble::column_to_rownames("drug") %>%
+  chisq.test() %>% 
+  broom::augment()
+
+plot_chisq_res <-function(chisq_drug, z){
+df <- chisq_drug %>% 
+  #janitor::clean_names() %>% 
+  filter(Var2 == "true") %>%
+  arrange(.residuals) %>% 
+  mutate(Var1 = factor(Var1) %>% fct_inorder())
+
+g <- df %>%
+  ggplot(aes(sample = .stdres)) +
+  stat_qq() + 
+  stat_qq_line()
+
+ldf <- ggplot_build(g)$data[[2]]
+
+df_qq <- df %>% cbind(ggplot_build(g)$data[[1]]) 
+
+
+
+df_qq %>% 
+  ggplot(aes(x, .stdres, label = Var1)) + 
+  geom_point(color = "grey", alpha = 0.7) + 
+  geom_abline(slope = (ldf$y[2] - ldf$y[1])/(ldf$x[2] - ldf$x[1]),
+              intercept = (ldf$y[2] + ldf$y[1])/2) + 
+  theme_classic() + 
+  geom_point(data = df_qq %>% filter(.stdres > z)) +
+  labs(y = "scaled residuals of Chi-Square test",
+       x = "theoretical",
+       title = "MEK-inhibitors are part of the most negative correlations",
+       subtitle = "Chi-Square test of drugs with negative correlations",
+       caption = "All drugs are also among strongest positive correlation partners") + 
+  geom_text_repel(data = df_qq %>% filter(.stdres > z))
+}
+  
+
+plot_chisq_res(chisq_drug, z = 5)
+```
+
+This approach was not conclusive enough. I continue my analysis. 
+
+```{r}
+bag <- crxg %>% 
+  dplyr::select(drug_name, putative_target) %>% 
+  distinct() %>% 
+  mutate(string = str_split(string = putative_target, pattern = ",")) %>% 
+  dplyr::select(-putative_target)
+
+cor_pan_grid <- cor_pan_test %>% 
+  mutate(significant = fwer < 10E-3 & r < 0) %>% 
+  dplyr::select(drug_name_x,drug_name_y,significant) %>% 
+  left_join(bag %>% rename(drug_name_x = drug_name, string_x = string), by = "drug_name_x") %>% 
+  left_join(bag %>% rename(drug_name_y = drug_name, string_y = string), by = "drug_name_y") %>% 
+  
+  mutate(grid = purrr::map2(string_x, string_y, ~ expand.grid(.x, .y) %>% as_tibble %>% mutate_all(funs(as.character)))) 
+
+
+cor_pan_grid_chisq <- cor_pan_grid %>% 
+  #sample_n(30) %>%
+  unnest(grid) %>% 
+  mutate(Var1 = Var1 %>% str_trim(),
+         Var2 = Var2 %>% str_trim()) %>% 
+  rowwise() %>%
+  mutate(unit = paste(c(Var1, Var2) %>% sort(), collapse = "_")) %>%
+  dplyr::select(-Var1, -Var2) %>%
+  mutate(drug = paste(drug_name_x, drug_name_y, sep = "_")) %>%
+  dplyr::select(-drug_name_x, -drug_name_y) %>% 
+  ungroup() %>%
+  count(unit, significant) %>% 
+  arrange(unit) %>% 
+  spread(significant, n, fill = 0) %>% 
+  janitor::clean_names() %>% 
+  as.data.frame() %>% 
+  tibble::column_to_rownames("unit") %>%
+  chisq.test() %>% 
+  broom::augment()
+
+
+
+plot_chisq_res(cor_pan_grid_chisq, z = 17) + 
+  labs(title = "The response to MEK- and AKT-inhibition is anticorrelated",
+       caption = "After decomposition of drugs in their putative targets, non-negative data") + 
+  scale_y_sqrt() + 
+  ggsave("target_interaction.png", width = 6, height = 6)
+```
+
+
+I create a plot of the correlation of pan-cancer vulnerabilities 
+
+```{r}
+pancancer_plot <- function(drug_df, method_in = "spearman"){
+
+  result <- drug_df %>%
+  #semi_join(groups %>% filter(feature == feature_input, value == 1), by = "cosmic_id") %>%
+  dplyr::select(norm_ln_ic50, drug_id, cosmic_id) %>% 
+  mutate_all(funs(na_zero)) %>%
+  spread(drug_id, norm_ln_ic50) %>%
+  dplyr::select(-cosmic_id) %>% 
+    cor(method = method_in, use = "pairwise.complete.obs") %>% 
+    pheatmap::pheatmap()
+}
+
+pancancer_plot(drug_df = crxg, method_in = "pearson")
+```
+
+
+```{r, eval = TRUE}
+iterate_correlation <- function(feature_input, drug_df, groups, method_in = "spearman"){
+  drug_anno <- drug_df %>% dplyr::select(drug_name, drug_id, target_pathway) %>% distinct()
+  print(feature_input)
+  
+  result <- drug_df %>% 
+  semi_join(groups %>% filter(feature == feature_input, value == 1), by = "cosmic_id") %>% 
+  dplyr::select(norm_ln_ic50, drug_id, cosmic_id) %>% 
+  mutate_all(funs(na_zero)) %>%
+  spread(drug_id, norm_ln_ic50) %>%
+  dplyr::select(-cosmic_id) %>%
+  corrr::correlate(method = method_in) %>% 
+  corrr::shave() %>% 
+  corrr::stretch() %>% 
+  drop_na() %>% 
+  mutate(drug_id = x %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_x = drug_name, target_pathway_x = target_pathway) %>% 
+  mutate(drug_id = y %>% as.numeric()) %>% 
+  left_join(drug_anno, by = "drug_id") %>% 
+  distinct() %>% 
+  dplyr::select(-drug_id, drug_name_y = drug_name, target_pathway_y = target_pathway) %>% 
+  mutate(feature = feature_input) 
+  
+  return(result)
+}
+
+cor_iter <- features %>% 
+  lapply(iterate_correlation, drug_df = crxg, groups = grouping_long, method_in = "pearson")
+  #parallel::mclapply(iterate_correlation, drug_df = crxg, groups = grouping_long)
+
+cor_iter_df <- cor_iter %>% bind_rows()
+saveRDS(cor_iter_df, here("data/cor_iter.Rds"))
+```
+
+
+```{r}
+readRDS(here("data/cor_iter.Rds"))
+
+cor_iter_df_f <- cor_iter_df %>% 
+  left_join(grouping_order %>% 
+  dplyr::select(feature, percent_feature = percent)) %>% 
+  mutate(log_percent_feature = log(percent_feature))
+```
+
+```{r}
+plot_correlation<- function(var1, var2, df = crxg){
+  df %>% 
+    filter(drug_id == var1 | drug_id == var2) %>% 
+    select_(.dots = c("drug_id", "cosmic_id", "norm_ln_ic50")) %>% 
+    spread(drug_id, norm_ln_ic50) %>% 
+    magrittr::set_colnames(c("cosmic_id", "drug_1", "drug_2")) %>%
+    ggplot(aes(drug_1, drug_2)) +
+      geom_point() + 
+      theme_classic() + 
+    labs()
+}
+	
+#plot_correlation(var1 = 272, var2 =274)
+#plot_correlation(var1 = 326, var2 =1372)
+
+plot_correlation(var1 = 326 , var2 =1526) + 
+  labs(x = "gsk690693 [PI3K/MTOR]",
+       y = "refametinib [MEK]",
+       title = "Anticorrelation of AKT and MEK inhibition",
+       caption = ">20E4 drug-drug pairs across all celllines") + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  ggsave("akt_mek_pancancer.png", width = 4, height = 4)
+
+var1 = 326 
+var2 =1526 
+
+mutation_df <- mutation %>% 
+  dplyr::select(PIK3CA, KRAS, cosmic_id) %>% 
+  mutate(mutation = case_when(PIK3CA ==1 & KRAS == 0 ~ "PIK3CA",
+                              PIK3CA ==0 & KRAS == 1 ~ "KRAS",
+                              PIK3CA ==1 & KRAS == 1 ~ "both",
+                              PIK3CA ==0 & KRAS == 0 ~ "WT",
+                              TRUE ~ "WT"),
+         mutation = if_else(is.na(mutation), "WT", mutation),
+         mutation = factor(mutation))
+
+  crxg %>% 
+    filter(drug_id == var1 | drug_id == var2) %>% 
+    select_(.dots = c("drug_id", "cosmic_id", "norm_ln_ic50")) %>% 
+    spread(drug_id, norm_ln_ic50) %>% 
+    magrittr::set_colnames(c("cosmic_id", "drug_1", "drug_2")) %>%
+    mutate(cosmic_id = cosmic_id %>% as.character()) %>%
+    left_join(mutation_df, by = "cosmic_id") %>%
+    drop_na() %>%
+    ggplot(aes(drug_1, drug_2, color = mutation)) +
+      geom_point() + 
+      theme_classic() +
+  labs(x = "gsk690693 [PI3K/MTOR]",
+       y = "refametinib [MEK]",
+       title = "Anticorrelation of AKT and MEK inhibition",
+       caption = ">20E4 drug-drug pairs across all celllines") + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+    scale_color_manual(values = c(RColorBrewer::brewer.pal(3, "Set1"), "#808080")) +
+  ggsave("akt_mek_pancancer_anno.png", width = 5, height = 4) 
+```
+
+
+I determine the percentage of available drug response data and add it to the model. 
+
+```{r}
+df <- crxg %>% 
+  dplyr::select(norm_ln_ic50, drug_id, cosmic_id) %>% 
+  #mutate_all(funs(na_zero)) %>%
+  spread(drug_id, norm_ln_ic50) 
+
+percent_drug <- colSums(is.na(df)) %>% 
+  tibble(n_miss = .,
+         drug_id = names(.)) %>% 
+  filter(drug_id != "cosmic_id") %>% 
+  mutate(percent_drug = n_miss/n_total) %>% 
+  dplyr::select(drug_id, percent_drug)
+
+cor_iter_df_fd <- cor_iter_df_f %>% 
+  mutate(drug_id = x) %>% 
+  left_join(percent_drug, by = "drug_id") %>%
+  select(-drug_id, percent_drug_x = percent_drug) %>%
+  mutate(drug_id = y) %>% 
+  left_join(percent_drug, by = "drug_id") %>%
+  select(-drug_id, percent_drug_y = percent_drug)
+  
+```
+
+I save the current object. 
+
+```{r}
+saveRDS(cor_iter_df_fd, here("data/cor_iter_df_fd.Rds"))
+```
+
+
+I am interested in the effect of the feature abundance on the correlation coefficients. 
+
+```{r}
+cor_iter_df_fd %>% 
+  sample_frac(0.01) %>%
+  filter(percent_feature > 2) %>%
+  ggplot(aes(percent_feature, r)) + 
+  geom_point(alpha = 0.8) + 
+  theme_bw() + 
+  scale_x_log10() + 
+  geom_smooth()
+```
+
+
+
+
+```{r}
+cor_iter_df_fd %>% 
+  sample_frac(0.01) %>%
+  mutate(percent_drug = percent_drug_x + percent_drug_y) %>%
+  ggplot(aes(percent_drug, r)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_x_log10() + 
+  geom_smooth() + 
+  labs()
+```
+
+
+
+
+## Drug class correlatio
+
+## Write database
+
+The database consists of the following tables 
+* drug_response 
+* cnv
+* mutation
+* expression
+* cell_metadata
+* correlation
+
+```{r}
+
+```
+
+

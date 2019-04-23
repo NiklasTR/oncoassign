@@ -1,0 +1,113 @@
+---
+title: "subtype_specific_anaysis"
+author: "Niklas Rindtorff"
+date: "5/13/2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+#Introduction 
+
+I want to simulate the current inclusion criteria into NCI Match. 
+
+#Load packages
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(here)
+library(umap)
+
+covariates <- read_csv(here("data/covariates.csv"))
+```
+
+
+# Read molecular data
+
+I create a large object for every cell line that contains the genomic features.
+
+```{r, message=FALSE, warning=FALSE}
+expression <- read_delim(here("local_data/sanger1018_brainarray_ensemblgene_rma.txt"), 
+    "\t", escape_double = FALSE, trim_ws = TRUE)%>% 
+  as.matrix() %>%
+  t() %>% 
+  as.data.frame() %>% 
+  magrittr::set_colnames(.[1,] %>% unlist() %>% as.character()) %>% 
+  rownames_to_column("cosmic_id") %>% 
+  .[-1,]
+
+save(expression, file = here("data/expression.Rdata"))
+write_csv(expression, path = here("data/expression.csv"))
+```
+
+
+I import genetic data as well. This is the most relevant feature for patient allocation. 
+
+```{r, warning=FALSE, message=FALSE}
+mutation <- read_delim("local_data/CellLines_CG_BEMs/PANCAN_SEQ_BEM.txt", 
+    "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  as.matrix() %>%
+  t() %>% 
+  as.data.frame() %>% 
+  magrittr::set_colnames(.[1,] %>% unlist() %>% as.character()) %>% 
+  rownames_to_column("cosmic_id") %>% 
+  .[-1,]
+
+save(mutation, file = here("data/mutation.Rdata"))
+write_csv(mutation, path = here("data/mutation.csv"))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+cnv <- read_delim(here("local_data/CellLine_CNV_BEMs/PANCAN_CNA_BEM.rdata.txt"), 
+    "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(cosmic_id = x1, everything())
+
+save(cnv, file = here("data/cnv.Rdata"))
+write_csv(cnv, path = here("data/cnv.csv"))
+```
+
+
+# UMAP 
+
+```{r}
+umap_cnv_mut <- cnv %>% 
+  mutate(cosmic_id = as.character(cosmic_id)) %>%
+  left_join(mutation) %>% 
+  semi_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id))) %>%
+  dplyr::select(-cosmic_id) %>%
+  mutate_all(funs(as.character)) %>%
+  mutate_all(funs(as.numeric)) %>% 
+  drop_na() %>%
+  as.matrix() %>% 
+  umap::umap()
+```
+
+
+```{r, eval = FALSE}
+
+umap_cnv_mut$layout %>% 
+  cbind(cnv %>% 
+  mutate(cosmic_id = as.character(cosmic_id)) %>%
+  left_join(mutation) %>% 
+  left_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+              dplyr::select(-msi, -medium, -adherent, -semi_adherent, -suspension) %>% 
+              gather(tissue, present, -cosmic_id) %>% 
+              filter(present == 1) %>% 
+              select(-present)) %>%
+    drop_na()) %>% 
+  as_tibble() %>% 
+  janitor::clean_names() %>%
+  ggplot(aes(x1, x2, color = tissue)) + 
+  geom_point()  + 
+  facet_wrap(~ tissue)
+  
+```
+

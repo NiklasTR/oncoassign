@@ -1,0 +1,376 @@
+---
+title: "subtype_specific_anaysis"
+author: "Niklas Rindtorff"
+date: "5/13/2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+#Introduction 
+
+I want to simulate the current inclusion criteria into NCI Match. 
+
+#Load packages
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(here)
+```
+
+#Import data
+
+```{r}
+load(here("data/crxg.Rdata"))
+load(here("data/crxg_map.Rdata"))
+```
+
+
+#Filtering cell lines
+The current result only return the minimal r for a pan-cancer approach. However, I am interested in anti-correlation in clinically relevant subgroups. 
+
+First I see how many cell lines are present for every subgroup. I kick out all cancertypes with less than 10 cell lines per entity and no clear annotation.
+
+```{r}
+keep_types <- crxg %>% ungroup %>% select(cancer_type, cosmic_id) %>% distinct() %>% group_by(cancer_type) %>% 
+  summarise(n = n()) %>% 
+  arrange(n) %>% filter(n > 10) %>% 
+  filter(!grepl(cancer_type, pattern = "UNABLE")) %>% drop_na() %>% .$cancer_type 
+
+crxg %>% ungroup %>% filter(!is.na(drug_id), !is.na(cosmic_id)) %>%
+  ##modification to group by gdsc_tissue_1 annotation 
+  #dplyr::select(-cancer_type) %>% 
+  #rename(cancer_type = gdsc_tissue_1) %>% 
+  ##
+  select(cancer_type, cosmic_id) %>% distinct() %>% group_by(cancer_type) %>% summarise(n = n()) %>% 
+  arrange(n) %>% 
+  mutate(cancer_type = factor(cancer_type, levels = .$cancer_type)) %>%
+  ggplot(aes(cancer_type, n)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_y_log10() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_hline(yintercept = 10) + 
+  xlab("Cance Type") + 
+  ggsave("filter_cell_lines.pdf", width = 3, height = 2)
+```
+
+I remove all cancer entities that do not make it past the threshold.
+
+```{r}
+crxgf <- crxg %>% filter(cancer_type %in% keep_types)
+save(crxgf, file = "crxgf.Rdata")
+```
+
+#Correlate responses for each cancer type
+
+I define a function to calculate spearman correlations for multiple subgroups.
+Then I plot the null distribution of all correlation coefficients for every tissue type.
+
+```{r}
+calc_subgroup_cor <- function(df){
+tmp <- df %>% dplyr::select(drug_id, cosmic_id, rob_z) %>%
+  spread(drug_id, rob_z) %>% 
+  dplyr::select(-cosmic_id)%>%
+  corrr::correlate(method = "spearman", use = "pairwise.complete.obs") %>%
+  corrr::stretch() %>% 
+  unite(pair, x, y)
+
+return(tmp)
+}
+
+crxgr_type <-crxgf %>% 
+  filter(!is.na(drug_id), !is.na(cosmic_id), cancer_type %in% keep_types) %>%
+  group_by(cancer_type) %>% 
+  do(calc_subgroup_cor(.))
+
+crxgr_type %>% 
+  ggplot(aes(r)) + 
+  geom_density(aes(group = cancer_type)) + 
+  theme_classic() + 
+  xlab("Spearman correlation coefficient") + 
+  ggsave("null_r_type.pdf", width = 3, height = 2)
+```
+
+
+Now I link the group-wise effects with the anti-correlation scores.
+
+```{r, eval = FALSE}
+#crxgr_type
+crxgra_type <- crxgr_type %>%  
+  ungroup() %>% #crxgr_type with annotation 
+  #dplyr::sample_n(1000) %>%
+  #distinct(., keep_all = TRUE) %>% 
+  separate(pair, c("d1", "d2"), remove = TRUE) %>% #I keep only the first id for each row
+  mutate(d1 = d1 %>% as.numeric) %>% 
+  mutate(d2 = d2 %>% as.numeric)  %>% 
+  rowwise() %>%
+  mutate(pair = paste(c(d1, d2) %>% sort(), collapse =  "_")) %>%
+  drop_na() %>% 
+  dplyr::select(-d1, -d2) %>% 
+  distinct(cancer_type, r, pair) %>% 
+  separate(pair, c("d1", "d2"), remove = FALSE) %>% #Now the columns are ordered systematically
+  gather(number, drug_id, -r, -cancer_type, -pair) %>%
+  
+  #rowwise() %>%
+  #mutate(pair = str_split(pair, pattern = "_") %>% simplify() %>% as.numeric() %>% sort() %>% paste(., collapse =  "_")) %>% 
+  ungroup() %>%
+######## commenting out this phrase since cancer_effects are not assesed
+  #left_join(., cancer_type_effects) %>%
+########
+  left_join(., crxg %>% dplyr::select(drug_id, drug_name, target) %>% 
+              ungroup %>% mutate(drug_id = as.character(drug_id)) %>% 
+              distinct())
+```
+
+I perform a quick save
+
+```{r, eval = TRUE}
+save(crxgra_type, file="crxgra_type.Rdata")
+```
+
+```{r}
+load(file="crxgra_type.Rdata")
+```
+
+I run another set of formating step of the dataset
+
+```{r}
+crxgra_type <- crxgra_type %>% separate(pair, c("d1", "d2"), remove = FALSE) %>% 
+  dplyr::select(-number, - drug_id, -drug_name, -target) %>% distinct() %>%
+  left_join(crxg %>% dplyr::select(drug_id, drug_name, target) %>%
+              mutate(d1 = drug_id %>% as.character) %>% 
+              distinct() %>% dplyr::select(-drug_id)) %>% rename(d1_drug_name = drug_name,
+         d1_target = target) %>% 
+  left_join(crxg %>% dplyr::select(drug_id, drug_name, target) %>%
+              mutate(d2 = drug_id %>% as.character) %>% 
+              distinct() %>% dplyr::select(-drug_id)) %>% rename(d2_drug_name = drug_name,
+         d2_target = target) %>% distinct()
+
+crxgr_type <- crxgr_type %>% separate(pair, c("d1", "d2"), remove = FALSE) %>% 
+   distinct() %>%
+  left_join(crxg %>% dplyr::select(drug_id, drug_name, target) %>%
+              mutate(d1 = drug_id %>% as.character) %>% 
+              distinct() %>% dplyr::select(-drug_id)) %>% rename(d1_drug_name = drug_name,
+         d1_target = target) %>% 
+  left_join(crxg %>% dplyr::select(drug_id, drug_name, target) %>%
+              mutate(d2 = drug_id %>% as.character) %>% 
+              distinct() %>% dplyr::select(-drug_id)) %>% rename(d2_drug_name = drug_name,
+         d2_target = target) %>% distinct()
+```
+
+#GI cancer Case Study 
+
+```{r}
+crxgr_type %>% 
+  ggplot(aes(x = r, y = cancer_type)) + 
+  geom_density_ridges(aes(group = cancer_type), rel_min_height = 0.005) + 
+  theme_classic() + 
+  xlab("Spearman correlation coefficient") + 
+  theme_ridges()
+```
+
+I select a subset of GI cancer types and remove compounds show an overall low response in that specific cancer type
+
+```{r}
+# crxg %>% 
+#   filter(!is.na(drug_id), !is.na(cosmic_id), cancer_type %in% c("COAD/READ", "ESCA", "PAAD", "STAD")) %>% 
+#   group_by(drug_name) %>% 
+#   summarise(var = var(rob_z)) %>% 
+#   filter(var > 2) %>%
+#   ggplot(aes(reorder(drug_name, -var), var)) + 
+#   geom_point()
+
+crxg %>% 
+  filter(!is.na(drug_id), !is.na(cosmic_id)) %>% 
+  dplyr::select(drug_name, cancer_type, ln_ic50) %>% 
+  nest(-drug_name, -cancer_type) %>% 
+  left_join(., 
+    crxg %>% 
+    filter(!is.na(drug_id), !is.na(cosmic_id)) %>% 
+    dplyr::select(drug_name, ln_ic50) %>% 
+    nest(-drug_name, .key = pan_data)) %>% 
+  filter(cancer_type %in% c("COAD/READ", "ESCA", "PAAD", "STAD")) %>% 
+  mutate(data = map(data, ~ as.data.frame(.x))) %>%
+  mutate(pan_data = map(pan_data, ~ as.data.frame(.x))) %>%
+  mutate(tmp = map2(data, pan_data, ~ ks.test(.x, .y)))
+  
+  
+#crxg %>%
+#  filter(!is.na(drug_id), !is.na(cosmic_id)) %>% 
+  
+  
+```
+
+
+
+```{r}
+crxgf %>% 
+  #filter(!is.na(drug_id), !is.na(cosmic_id), cancer_type %in% keep_types) %>%
+  #filter(cancer_type == "COAD/READ") %>% 
+  filter(!is.na(drug_id), !is.na(cosmic_id), cancer_type %in% c("COAD/READ", "ESCA", "PAAD", "STAD")) %>%
+  dplyr::select(drug_id, cosmic_id, rob_z) %>%
+    spread(drug_id, rob_z) %>% 
+    dplyr::select(-cosmic_id)%>%
+    cor(method = "spearman", use = "pairwise.complete.obs") %>% 
+  pheatmap::pheatmap(filename = "gi_cancer_cor.pdf",
+                     width = 10, height = 10)
+  
+  
+```
+
+
+I plot an example of a strongly correlating drug pair and an anti-correlating drug-pair 
+
+```{r}
+crxg %>% filter(drug_id %in% c(179, 1377), cancer_type == "COAD/READ") %>% 
+  select(drug_id, ln_ic50, cosmic_id) %>% 
+  spread(drug_id, ln_ic50) %>% 
+  ggplot(aes(`179`, `1377`)) + 
+  geom_point() + 
+  theme_classic() +
+  geom_smooth(method=lm, se=FALSE, color = "black") +
+  ggtitle("5FU and Afatinib (EGFRi)")
+```
+
+For contrast, I plot a drug pair which correlates very strong. Both compounds have the same mechanism of action.
+
+
+```{r}
+#1372_1526
+crxg %>% filter(drug_id %in% c(1526, 1372), cancer_type == "COAD/READ") %>% 
+  select(drug_id, ln_ic50, cosmic_id) %>% 
+  spread(drug_id, ln_ic50) %>% 
+  ggplot(aes(`1526`, `1372`)) + 
+  geom_point() + 
+  theme_classic() + 
+  geom_smooth(method=lm, se=FALSE, color = "black") +
+  ggtitle("Trametinib and Refamitinib") 
+```
+
+
+#Abadoned Approaches 
+##Estimate treatment effect size
+
+Now I want to link a correlation pair with a median relative effect for each substance of the pair in its respective subset.
+First I build a table that describes the drug effect for a defined subset. 
+This approach is not perfect yet, as it is probably highly dependent on the size of each cancer_type group.
+
+```{r}
+cancer_type_effects <- crxg %>% group_by(cancer_type, drug_id) %>% summarise(type_effect = median(rob_z, na.rm = TRUE)) %>% mutate(drug_id = as.character(drug_id))
+
+cancer_type_effects%>% 
+  ggplot(aes(type_effect)) + 
+  geom_density(aes(group = cancer_type)) + theme_classic()
+```
+
+
+
+Now I calculate a score for each drug pair 
+
+```{r}
+crxgrae_type <- crxgra_type %>% 
+  ungroup() %>% 
+  #sample_n(1000) %>%
+  group_by(cancer_type, pair) %>%
+  mutate(effect_sum = sum(type_effect)) %>% 
+  ungroup() %>% 
+  mutate(score = (r-1) * effect_sum) 
+
+crxgrae_type %>% 
+  #filter(cancer_type == "COAD/READ") %>%
+  ggplot(aes(effect_sum, r)) + 
+  #geom_point(aes(color = score), alpha = 0.2) + 
+  geom_density_2d() +
+  theme_classic() + 
+  geom_smooth()
+```
+
+I take a look at some examples 
+
+```{r}
+coi <- c("179_1494") #, #Irinotecan + 5-FU
+         #)
+# 326_1377 hit
+# 179_1377 5-FU and EGFR
+
+crxgrae_type %>% 
+  filter(cancer_type == "COAD/READ") %>% 
+  arrange(r) %>% 
+  mutate(pair = factor(pair, levels = .$pair %>% unique())) %>% 
+  ggplot(aes(pair, r)) + 
+  geom_point() + 
+  #geom_density() + 
+  theme_classic() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+
+##Draw networks of anticorrelated drug pairs
+
+
+```{r}
+crxgr_type %>% drop_na() %>% group_by(cancer_type) %>% 
+  mutate(m = median(r, na.rm = TRUE), mad = m-3*mad(r, na.rm = TRUE)) %>% 
+  ungroup() %>%
+  mutate(hit = if_else(r < mad, TRUE, FALSE)) %>% 
+  filter(hit == TRUE) %>% 
+  filter(cancer_type == "LUAD") %>% 
+  dplyr::select(d1_drug_name, d2_drug_name, r) %>% 
+  #Afatinib is a drug with multiple ids. To remove these duplicates I simply build an average.
+  group_by(d1_drug_name, d2_drug_name) %>% 
+  summarise(r = mean(r)) %>%
+  spread(d1_drug_name, r) %>% 
+  column_to_rownames("d2_drug_name") %>% 
+  pheatmap::pheatmap(cluster_rows = F, cluster_cols = F, na_col = "white")
+```
+
+```{r}
+crxgra_type %>% drop_na() %>% group_by(cancer_type) %>% 
+  mutate(m = median(r, na.rm = TRUE), mad = m-3*mad(r, na.rm = TRUE)) %>% 
+  ungroup() %>%
+  mutate(hit = if_else(r < mad, TRUE, FALSE)) %>% 
+  filter(hit == TRUE) %>% 
+  filter(cancer_type == "COAD/READ") %>% 
+  #dplyr::select(d1_drug_name, d2_drug_name, r) %>% 
+  #Afatinib is a drug with multiple ids. To remove these duplicates I simply build an average.
+  group_by(d1_drug_name, d2_drug_name) %>% 
+  summarise(r = mean(r)) %>% 
+  as_tbl_graph(directed = FALSE) %>% 
+  ggraph(layout = 'kk') + 
+  geom_edge_fan( show.legend = FALSE, width = 1.5) +
+  geom_node_point(repel = TRUE, alpha = 1, size = 3) + 
+  geom_node_text(aes(label = name), size = 3)  +
+  theme_graph() + 
+  ggsave("graph_coadread.pdf")
+  
+```
+
+```{r}
+crxgra_type %>% drop_na() %>% group_by(cancer_type) %>% 
+  mutate(m = median(r, na.rm = TRUE), mad = m-3*mad(r, na.rm = TRUE)) %>% 
+  ungroup() %>%
+  mutate(hit = if_else(r < mad, TRUE, FALSE)) %>% 
+  filter(hit == TRUE) %>% 
+  filter(cancer_type == "LUAD") %>% 
+  #dplyr::select(d1_drug_name, d2_drug_name, r) %>% 
+  #Afatinib is a drug with multiple ids. To remove these duplicates I simply build an average.
+  group_by(d1_drug_name, d2_drug_name) %>% 
+  summarise(r = mean(r)) %>% 
+  as_tbl_graph(directed = FALSE) %>% 
+  ggraph(layout = 'kk') + 
+  geom_edge_fan( show.legend = FALSE, width = 1.5) +
+  geom_node_point(repel = TRUE, alpha = 1, size = 3) + 
+  geom_node_text(aes(label = name), size = 3)  +
+  theme_graph() + 
+  ggsave("graph_luad.pdf")
+```
+
