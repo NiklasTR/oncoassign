@@ -10,19 +10,62 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
+library(tidyverse)
 library(rlearner)
 library(randomizr)
+library(here)
 ```
 
 ```{r}
-allocation <- read_csv(here("data/allocation.csv"))
+allocation <- read_csv(here("data/allocation.csv")) %>% mutate(cosmic_id = as.character(cosmic_id))
+covariates <- read_csv(here("data/covariates.csv")) %>% mutate(cosmic_id = as.character(cosmic_id))
+
 load(here("data/crxg_map_imputed.Rdata"))
+load(here("data/mutation.Rdata"))
+load(here("data/expression.Rdata"))
+
+```
+
+I source a set of functions, I will aggregate all of this in a package later. 
+
+```{r, message=FALSE}
+list.files(here("R"), full.names = TRUE) %>% lapply(source)
+```
+
+
+Similar to many causal inference problems, we have three datasets: unit covariates *X*, assignment *w* and responses *y*. 
+
+First, I create a harmonized group of datasets. 
+
+```{r}
+# I define my covariate data
+X <- mutation %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+ #inner_join(expression %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+ # inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+  inner_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)))
+
+
+# I filter the dataset so the data is complete for every unit
+y_complete <- crxg_map_imputed %>% 
+  semi_join(X, by = "cosmic_id") %>% 
+  semi_join(allocation, by = "cosmic_id")
+
+X <- X %>% 
+  semi_join(crxg_map_imputed, by = "cosmic_id") %>% 
+  semi_join(allocation, by = "cosmic_id")
+
+w <- allocation %>% 
+  semi_join(X, by = "cosmic_id") %>% 
+  semi_join(crxg_map_imputed, by = "cosmic_id")
+
 ```
 
 
 The R-Learner is per default designed to evaluate the CATE of binary treatments. That means, a unit is either treated with a control of an intervention. In our case, we will define a central control arm, Cisplatin, which is commonly used in cases in which no further information about a malignant tumor is available (CUP Syndrome). 
 
 For each treatment, we will train a two-step R-learner and estimate the CATE for the targeted agent vs. Cisplatin. 
+
+Performing this type of star-schema analysis comes with a number of constraints. First, the model will be trained on a smaller number of cases and will likely be less generalizable to CATE estimation problems involving other therapies. Second, this way of analysis does not allow epsilon to be greater than 0, especially if we plan to supply the treatment propensities to the R-Learner.
 
 We define three functions around the R-learner: 
 1. A function that estimates the *w* parameter for weighted allocation
@@ -31,102 +74,68 @@ We define three functions around the R-learner:
 1. A function that will collect the predicted CATEs for each treatment arm and calculate an aggregated performance metric
 
 ```{r}
-estimate_cross <- function(allocation, 
-                       epsilon = 0.05, 
-                       ctrl_name = "cisplatin"){
-# calculating proportions
-df <- allocation %>% 
-    gather(assignment, drug, -cosmic_id) %>% 
-    filter(drug == 1) %>% 
-    count(assignment) %>% 
-    mutate(total = sum(n),
-           w = n/total,
-           type = if_else(assignment == ctrl_name, "ctrl", "treatment")) %>% 
-    dplyr::select(-total)
-
-# estimating gamma
-g <- df %>% 
-  filter(type == "ctrl") %>% 
-  .$w # in this case 1- the cummulative w
-g <- g*epsilon
-
-# calculating cross_in and cross_over
-df %>% filter(type != "ctrl")  %>% 
-  mutate(gamma = g) %>%
-  mutate(epsilon = epsilon) %>%
-  dplyr::select(-type) %>% 
-  mutate(cross_in = gamma*w,
-         cross_over = epsilon*w) %>%
-    return()
-}
-
-estimate_cross(allocation) # %>% knitr::kable()
+estimate_cross(w) # %>% knitr::kable()
 ```
 
 ```{r}
-cross <- estimate_cross(allocation) # %>% knitr::kable()
+x = rep(seq(0,1, 0.01), each = 5)
 
-reassign <- function(var, ctrl = "cisplatin", cross_probs){
-  if(var != ctrl){
-    # define probs and variables
-    probs = c(cross_probs %>% filter(assignment != var) %>% .$cross_over)
-    probs = c(1-sum(probs), probs)
-    reassignment = c(cross_probs %>% filter(assignment != var) %>%  .$assignment)
-    reassignment = c(var, reassignment)
-    # return output 
-    simple_ra(N = 1, prob_each = probs, conditions= reassignment) %>% 
-      as.character() %>% 
-      return()
-  }
-  else if(var == ctrl){
-    # define probs and variables
-    probs = c(cross_probs %>% filter(assignment != var) %>% .$cross_in)
-    probs = c(1-sum(probs), probs)
-    reassignment = c(cross_probs %>% filter(assignment != var) %>%  .$assignment)
-    reassignment = c(var, reassignment)
-    # return output 
-    simple_ra(N = 1, prob_each = probs, conditions= reassignment) %>% 
-      as.character() %>% 
-      return()
-  }
-  else {"someting is broken"}
-}
-
-re_allocation <- allocation %>% 
-    gather(assignment, drug, -cosmic_id) %>% 
-    filter(drug == 1) %>% 
-  dplyr::select(- drug) %>% 
-  nest(-cosmic_id) %>%
-  mutate(new = purrr::map(data, ~ .x %>% mutate(re_assignment = reassign(assignment, cross_probs = cross)))) %>% 
-  unnest(new) %>% 
-  dplyr::select(-data) %>% 
-  arrange(cosmic_id)
+allocation_dynamics_epsilon <-  x %>% #gamma is scaling automatically
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin") %>% 
+  bind_rows() %>% 
+  cbind(., epsilon = rep(x, each = nrow(w))) %>%
+  as_tibble() %>%
+  count(epsilon, re_assignment)
 ```
-
-After defining a function to perform weighted reassignments, I have to generate result vectors based on a given reassignment. 
 
 ```{r}
-create_y <- function(allocation_in, response, var, ctrl = "cisplatin"){
-  response %>%
-  mutate(cosmic_id = as.character(cosmic_id)) %>%
-  semi_join(list$df,  by = "cosmic_id") %>%
-  dplyr::select(-cosmic_id) %>% 
-  
-  mutate_all(funs(as.character)) %>%
-  mutate_all(funs(as.numeric)) %>%
-  as.matrix()
-
-}
+allocation_dynamics_gamma <-  x %>% #fixing epsilon at 0.1
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", epsilon = 0.1) %>% 
+  bind_rows() %>% 
+  cbind(., epsilon = rep(x, each = nrow(w))) %>%
+  as_tibble() %>%
+  count(epsilon, re_assignment)
 ```
 
+
+```{r}
+allocation_dynamics_epsilon %>% 
+  ggplot(aes(epsilon, n, color = re_assignment)) + 
+  geom_point() + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual") + 
+  scale_y_log10() +
+  labs()
+```
+
+
+
+```{r}
+allocation_dynamics <-  tibble(epsilon = x,
+                               gamma = x) %>% 
+  mutate(data = furrr::map2(epsilon, gamma, ~ re_allocate(epsilon = .x, 
+                                                          gamma = .y, 
+                                                          allocation = w, ctrl= "cisplatin"))) %>% 
+  bind_rows() %>% 
+  cbind(., epsilon = rep(x, each = nrow(w))) %>%
+  as_tibble() %>%
+  count(epsilon, re_assignment)
+```
+
+After defining a function to perform weighted reassignments, I have to generate result vectors based on a given reassignment. The function name is *create_y*. 
+
+Now 
 
 ```{r}
 train_rlearner <- function(allocation_in, features, response, var, ctrl = "cisplatin"){
+  # I create a list to organize elements in the function
 list <- list()
+
+list$var = var
+list$ctrl = ctrl 
 
 var_q <- sym(var)
 ctrl_q <- sym(ctrl)
-
 
 list$df <- allocation_in %>% 
   mutate(cosmic_id = as.character(cosmic_id)) %>%
@@ -160,7 +169,7 @@ list$y <- response %>%
   mutate(y = if_else(re_assignment == ctrl, !!ctrl_q, !!var_q)) %>% 
   .$y
 
-
+# running the rlearner
 list$rlasso_fit = rlasso(list$x, list$w, list$y)
 list$rlasso_est = predict(list$rlasso_fit, list$x)
 
@@ -170,8 +179,101 @@ list$rboost_est = predict(list$rboost_fit, list$x)
 return(list)
 }
 
-out <- train_rlearner(re_allocation, X, crxg_map_imputed, var = "afatinib", ctrl = "cisplatin")
+out <- re_allocate(w, epsilon = 0.5, ctrl = "cisplatin") %>% 
+  train_rlearner(., X, y_complete, var = "trametinib", ctrl = "cisplatin")
 
+```
+
+* add p_hat estimate
+* grid search epsilon and gamma
+
+Measuring the PEHE for treatment effects.
+
+Different from the initial proposal, I did not modify the PEHE function for a reference-free context. Instead, as described above, I decided to pick a reference treatment, cisplatin.
+
+```{r}
+estimate_pehe <- function(rlearner_model, response = y_complete){
+  var_q <- sym(rlearner_model$var)
+  ctrl_q <- sym(rlearner_model$ctrl)
+  
+  rlearner_model$df %>% 
+    left_join(response, by = "cosmic_id") %>%
+    dplyr::select(cosmic_id, !!var_q, !!ctrl_q, assignment, re_assignment, logical) %>%
+    mutate(tau = !!var_q-!!ctrl_q) %>% 
+    mutate(tau_hat_lasso = rlearner_model$rlasso_est) %>% 
+    mutate(tau_hat_boost = rlearner_model$rboost_est) %>% 
+    mutate(pehe_lasso = (tau_hat_lasso - tau)^2,
+           pehe_boost = (tau_hat_boost - tau)^2) %>% 
+    mutate(var = rlearner_model$var,
+           ctrl = rlearner_model$ctrl) %>%
+    return()
+}
+
+estimate_pehe(out) %>% 
+  group_by(re_assignment, var) %>% 
+  summarise(pehe_lasso_sd = sd(pehe_lasso),
+            pehe_boost_sd = sd(pehe_boost),
+            pehe_lasso = mean(pehe_lasso),
+            pehe_boost = mean(pehe_boost))
+```
+
+```{r}
+estimate_pehe(out) %>% 
+  ggplot(aes(tau_hat_lasso, tau, color = re_assignment)) + 
+  geom_point() + 
+  theme_classic()
+```
+
+
+# Iterate R-Learner 
+
+40 minutes * 36 => 24h 
+
+```{r}
+iterate_rlearner <- function(epsilon_in, var_in){
+  re_allocate(w, epsilon = epsilon_in, ctrl = "cisplatin") %>% 
+  train_rlearner(., X, y_complete, var = var_in, ctrl = "cisplatin") %>% 
+    saveRDS(here(paste0("data/", epsilon_in, "_", var_in, "_", Sys.time())))
+}
+
+x = rep(seq(0,1, 0.2), each = 1)
+
+rlearner_epsilon <- expand.grid(epsilon = x,
+       drug = w[,-1] %>% colnames()) %>% 
+  filter(drug != "cisplatin") %>% 
+  mutate(drug = as.character(drug)) %>%
+  mutate(data = map2(epsilon,drug, ~ iterate_rlearner(epsilon_in = .x, var_in = .y)))
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+estimate_pehe(out) %>% .$pehe_boost %>% hist()
+```
+
+```{r}
+out <- re_allocate(w, epsilon = 0.5, ctrl = "cisplatin") %>% 
+  train_rlearner(., X, y_complete, var = "trametinib", ctrl = "cisplatin")
+```
+
+The performance of the rlearner is far from optimal. I start troubleshooting. 
+
+```{r}
+out$rlasso_est %>% hist()
+```
+
+
+
+```{r}
+y_complete %>% 
+  ggplot(aes(trametinib, cisplatin)) + 
+  geom_point() + 
+  theme_classic() + 
+  labs(title = "Association of Cisplatin and Trametinib response")
 ```
 
 
