@@ -9,8 +9,9 @@
 #'
 #' @examples
 estimate_cross <- function(allocation, 
-                           epsilon = 0.05,
-                           gamma = NA,
+                           epsilon = 0, # The star schema does not support epsilon > 0
+                           gamma = 0,
+                           omega = 0, 
                            ctrl_name = "cisplatin"){
   # calculating proportions
   df <- allocation %>% 
@@ -22,20 +23,24 @@ estimate_cross <- function(allocation,
            type = if_else(assignment == ctrl_name, "ctrl", "treatment")) %>% 
     dplyr::select(-total)
   
+  # calculating proportion of control for scaling
+  ctrl_prop <- df %>% filter(type == "ctrl") %>% .$w %>% unique()
+  # calculating proportion of treated for scaling
+  treat_prop <- df %>% filter(type != "ctrl") %>% .$w %>% sum()
+  
   # estimating gamma
   if(is.na(gamma)){
-  gamma <- df %>% 
-    filter(type == "ctrl") %>% 
-    .$w # in this case 1- the cummulative w
-  gamma <- gamma*epsilon
+  gamma <- ctrl_prop*epsilon
   }
+  
   
   # calculating cross_in and cross_over
   df %>% filter(type != "ctrl")  %>% 
     mutate(gamma = gamma) %>%
     mutate(epsilon = epsilon) %>%
     dplyr::select(-type) %>% 
-    mutate(cross_in = gamma*w,
-           cross_over = epsilon*w) %>%
+    mutate(cross_in = gamma*(w/treat_prop),
+           cross_over = epsilon*(w/treat_prop),
+           cross_out = omega) %>%
     return()
 }

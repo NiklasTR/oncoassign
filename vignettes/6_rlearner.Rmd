@@ -74,60 +74,96 @@ We define three functions around the R-learner:
 1. A function that will collect the predicted CATEs for each treatment arm and calculate an aggregated performance metric
 
 ```{r}
-estimate_cross(w) # %>% knitr::kable()
+estimate_cross(w, epsilon = 0, gamma = 1, omega = 0.1) # %>% knitr::kable()
 ```
 
 ```{r}
-x = rep(seq(0,1, 0.01), each = 5)
+re_allocate(w, epsilon = 0, gamma = 0.5, omega = 0.5, ctrl = "cisplatin") %>% 
+  mutate(same = assignment == re_assignment)
+```
+
+
+```{r}
+draw_interval = 0.05
+n_draws = 5
+
+x = rep(seq(0,1, draw_interval), each = n_draws)
+
+allocation_dynamics_gamma <-  x %>% #gamma is scaling automatically
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", epsilon = 0, omega = 0, return_propensity =FALSE) %>% 
+  bind_rows() %>% 
+  cbind(., gamma = rep(x, each = nrow(w))) %>%
+  as_tibble() %>%
+  count(gamma, re_assignment) %>% 
+  mutate(n = n/n_draws)
+
+allocation_dynamics_gamma %>% 
+  ggplot(aes(gamma, n, color = re_assignment)) + 
+  geom_point() + 
+  geom_line() +
+  theme_classic() + 
+  scale_color_brewer(type = "qual") + 
+   scale_y_log10(limits = c(1, 1000)) +
+  labs()
+```
+
+```{r}
+draw_interval = 0.05
+n_draws = 5
+
+x = rep(seq(0,1, draw_interval), each = n_draws)
 
 allocation_dynamics_epsilon <-  x %>% #gamma is scaling automatically
-  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin") %>% 
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", gamma = 0, omega = 0,return_propensity =FALSE) %>% 
   bind_rows() %>% 
   cbind(., epsilon = rep(x, each = nrow(w))) %>%
   as_tibble() %>%
-  count(epsilon, re_assignment)
-```
+  count(epsilon, re_assignment) %>% 
+  mutate(n = n/n_draws)
 
-```{r}
-allocation_dynamics_gamma <-  x %>% #fixing epsilon at 0.1
-  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", epsilon = 0.1) %>% 
-  bind_rows() %>% 
-  cbind(., epsilon = rep(x, each = nrow(w))) %>%
-  as_tibble() %>%
-  count(epsilon, re_assignment)
-```
-
-
-```{r}
 allocation_dynamics_epsilon %>% 
   ggplot(aes(epsilon, n, color = re_assignment)) + 
   geom_point() + 
+  geom_line() +
   theme_classic() + 
   scale_color_brewer(type = "qual") + 
-  scale_y_log10() +
+   scale_y_log10(limits = c(1, 1000)) +
+  labs()
+```
+
+```{r}
+draw_interval = 0.05
+n_draws = 5
+
+x = rep(seq(0,1, draw_interval), each = n_draws)
+
+allocation_dynamics_omega <-  x %>% #gamma is scaling automatically
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", epsilon = 0, gamma = 0,return_propensity =FALSE) %>% 
+  bind_rows() %>% 
+  cbind(., omega = rep(x, each = nrow(w))) %>%
+  as_tibble() %>%
+  count(omega, re_assignment) %>% 
+  mutate(n = n/n_draws)
+
+allocation_dynamics_omega %>% 
+  ggplot(aes(omega, n, color = re_assignment)) + 
+  geom_point() + 
+  geom_line() +
+  theme_classic() + 
+  scale_color_brewer(type = "qual") + 
+  scale_y_log10(limits = c(1, 1000)) +
   labs()
 ```
 
 
-
-```{r}
-allocation_dynamics <-  tibble(epsilon = x,
-                               gamma = x) %>% 
-  mutate(data = furrr::map2(epsilon, gamma, ~ re_allocate(epsilon = .x, 
-                                                          gamma = .y, 
-                                                          allocation = w, ctrl= "cisplatin"))) %>% 
-  bind_rows() %>% 
-  cbind(., epsilon = rep(x, each = nrow(w))) %>%
-  as_tibble() %>%
-  count(epsilon, re_assignment)
-```
+In case of a star-schema analysis, I need to introduce a third parameter, a cross-out rate omega. This parameter describes the rate at which a unit that matched a therapeutic protocol, after applying the cross_over rate,  is allocated into the control arm. Otherwise, these units had a treatment propensity for the control treatment of 0, thereby violating the positivity assumption.
 
 After defining a function to perform weighted reassignments, I have to generate result vectors based on a given reassignment. The function name is *create_y*. 
 
 Now 
 
 ```{r}
-train_rlearner <- function(allocation_in, features, response, var, ctrl = "cisplatin"){
+feed_rlearner <- function(allocation_in, features, response, var, ctrl = "cisplatin"){
   # I create a list to organize elements in the function
 list <- list()
 
@@ -137,7 +173,7 @@ list$ctrl = ctrl
 var_q <- sym(var)
 ctrl_q <- sym(ctrl)
 
-list$df <- allocation_in %>% 
+list$df <- allocation_in$re_allocation %>% 
   mutate(cosmic_id = as.character(cosmic_id)) %>%
   semi_join(response, by = "cosmic_id") %>%
   filter(re_assignment == var |  re_assignment == ctrl) %>% 
@@ -169,7 +205,19 @@ list$y <- response %>%
   mutate(y = if_else(re_assignment == ctrl, !!ctrl_q, !!var_q)) %>% 
   .$y
 
-# running the rlearner
+
+list$p <- list$df %>% mutate(initial_logical = if_else(re_assignment == ctrl, 0, 1)) %>% 
+  mutate(p_hat = if_else(initial_logical == 1, 
+                         1-(allocation_in$cross %>% filter(assignment == var) %>% .$cross_out), 
+                         allocation_in$cross %>% filter(assignment == var) %>% .$cross_in)) %>% 
+  .$p_hat
+
+return(list)
+}
+
+train_rlearner <- function(list, estimate_phat = TRUE){
+  if(estimate_phat == TRUE){
+  # running the rlearner
 list$rlasso_fit = rlasso(list$x, list$w, list$y)
 list$rlasso_est = predict(list$rlasso_fit, list$x)
 
@@ -177,15 +225,27 @@ list$rboost_fit = rboost(list$x, list$w, list$y)
 list$rboost_est = predict(list$rboost_fit, list$x)
 
 return(list)
+} else if(estimate_phat == FALSE){
+  # running the rlearner
+list$rlasso_fit = rlasso(list$x, list$w, list$y, p_hat = list$p)
+list$rlasso_est = predict(list$rlasso_fit, list$x)
+
+list$rboost_fit = rboost(list$x, list$w, list$y, p_hat = list$p)
+list$rboost_est = predict(list$rboost_fit, list$x)
+
+return(list)
+}
 }
 
-out <- re_allocate(w, epsilon = 0.5, ctrl = "cisplatin") %>% 
-  train_rlearner(., X, y_complete, var = "trametinib", ctrl = "cisplatin")
+
+out <- re_allocate(w, epsilon = 0, gamma = 0.5, omega = 0.5, ctrl = "cisplatin") %>% 
+  feed_rlearner(., X, y_complete, var = "trametinib", ctrl = "cisplatin") %>% 
+  train_rlearner(., estimate_phat = FALSE)
 
 ```
 
-* add p_hat estimate
-* grid search epsilon and gamma
+
+* grid search omega and gamma
 
 Measuring the PEHE for treatment effects.
 
@@ -227,26 +287,40 @@ estimate_pehe(out) %>%
 
 # Iterate R-Learner 
 
-40 minutes * 36 => 24h 
 
 ```{r}
-iterate_rlearner <- function(epsilon_in, var_in){
-  re_allocate(w, epsilon = epsilon_in, ctrl = "cisplatin") %>% 
-  train_rlearner(., X, y_complete, var = var_in, ctrl = "cisplatin") %>% 
-    saveRDS(here(paste0("data/", epsilon_in, "_", var_in, "_", Sys.time())))
+iterate_rlearner <- function(gamma_omega, var_in){
+  params <- gamma_omega %>% str_split(pattern = "_") %>% unlist() %>% as.numeric()
+  gamma <- params[1]
+  omega <- params[2]
+  
+  result <- re_allocate(w, epsilon = 0, gamma = gamma, omega = omega, ctrl = "cisplatin") %>% 
+  feed_rlearner(., X, y_complete, var = var_in, ctrl = "cisplatin") %>% 
+    train_rlearner(., estimate_phat = FALSE) 
+  
+  result %>%
+    saveRDS(here(paste0("data/", gamma_omega, "_", var_in, "_", Sys.time(), ".Rds")))
+  
+  return(result)
 }
 
-x = rep(seq(0,1, 0.2), each = 1)
-
-rlearner_epsilon <- expand.grid(epsilon = x,
-       drug = w[,-1] %>% colnames()) %>% 
+rlearner_grid <- expand.grid(gamma = rep(seq(0,1, 0.1), each = 1),
+                                omega = rep(seq(0,1, 0.1), each = 1),
+                                drug = w[,-1] %>% colnames()) %>% 
+  filter(gamma != 0, gamma != 1) %>% 
+  filter(omega != 0, omega != 1) %>%
   filter(drug != "cisplatin") %>% 
   mutate(drug = as.character(drug)) %>%
-  mutate(data = map2(epsilon,drug, ~ iterate_rlearner(epsilon_in = .x, var_in = .y)))
+  mutate(gamma_omega = paste0(gamma, "_", omega)) %>%
+  mutate(data = map2(gamma_omega,drug, ~ iterate_rlearner(gamma_omega = .x, var_in = .y))) %>% 
+  mutate(pehe = map(data, ~ estimate_pehe(.x)))
 ```
 
 ```{r}
-
+rlearner_grid$pehe[[1]] %>% 
+  ggplot(aes(tau_hat_lasso, tau, color = re_assignment)) + 
+  geom_point() + 
+  theme_classic()
 ```
 
 
