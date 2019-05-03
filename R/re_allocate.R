@@ -27,6 +27,6 @@ re_allocate <- function(allocation, epsilon, gamma, omega, ctrl, return_propensi
     return(list)
   }
   else if(return_propensity == FALSE){
-    return(re_allocation)
+    return(list$re_allocation)
   }
 }

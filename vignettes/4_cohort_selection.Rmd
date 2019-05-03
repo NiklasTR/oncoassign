@@ -117,7 +117,7 @@ I recreate the heatmap from before, but include the assignment mechanism.
 types_of_interest <- (crxg %>% 
     drop_na() %>%
     dplyr::select(cosmic_id, cancer_type ) %>% 
-    distinct() %>% count(cancer_type) %>% arrange(desc(n)) %>% filter(n > 30) %>% .$cancer_type)
+    distinct() %>% count(cancer_type) %>% arrange(desc(n)) %>% filter(n > 40) %>% .$cancer_type)
 
 
 anno_col  = crxg %>% drop_na() %>%
@@ -168,7 +168,7 @@ crxg_map_imputed %>%
                      show_rownames = TRUE, 
                      show_colnames = FALSE,
                      cutree_rows = 7, 
-                     filename = "crxg.png", 
+                     filename = "crxg.pdf", 
                      width = 12, height = 6
                      )
                      
@@ -181,6 +181,31 @@ allocation %>%
   mutate(value = 1) %>%
   spread(strict_arm, value, fill = 0) %>% 
   write_csv(here("data/allocation.csv"))
+```
+
+I create a ggridges figure 
+
+```{r}
+order <- crxg_map_imputed %>% 
+  gather(drug, response, -cosmic_id) %>% 
+  group_by(drug) %>% 
+  summarise(sd = sd(response)) %>% 
+  arrange(sd) %>% 
+  .$drug
+
+crxg_map_imputed %>% 
+  gather(drug, response, -cosmic_id) %>% 
+  mutate(drug = factor(drug, levels = order)) %>%
+  ggplot(aes(y = drug, x = response, fill = ..x..)) + 
+  ggridges::geom_density_ridges_gradient(scale = 2, rel_min_height = 0.01) +
+  theme_ridges() + 
+  scale_fill_gradient2() + 
+  labs(x = "centered ln(IC50)",
+       y = "Drug",
+       fill = "Response Score",
+       title = "Distribution of Response Scores by Drug",
+       caption = "990 cell lines, median imputation") +
+  ggsave("ridge_crxg.pdf", width = 6, height = 4)
 ```
 
 

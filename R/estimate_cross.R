@@ -39,6 +39,7 @@ estimate_cross <- function(allocation,
     mutate(gamma = gamma) %>%
     mutate(epsilon = epsilon) %>%
     dplyr::select(-type) %>% 
+    mutate(w = w/treat_prop)
     mutate(cross_in = gamma*(w/treat_prop),
            cross_over = epsilon*(w/treat_prop),
            cross_out = omega) %>%
