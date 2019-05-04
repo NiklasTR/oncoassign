@@ -1,0 +1,20 @@
+---
+title: "7_contextual_bandit"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(googlesheets)
+```
+
+We are running the the contextual bandit showdown repository 
+
+```{r}
+
+```
+
