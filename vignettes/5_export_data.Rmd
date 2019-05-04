@@ -30,11 +30,12 @@ load(here("data/expression.Rdata"))
 load(here("data/crxg.Rdata"))
 ```
 
-```{r}
+```{r, eval = FALSE}
+# for external use outside R
 # I create a dataset X that contains recommended treatments 
 X <- mutation %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
  # inner_join(expression %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
-  inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
+ # inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>% 
   inner_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)))
 ```
 
@@ -91,7 +92,7 @@ df%>%
 
 ```{r}
 umap.feature_extraction <- umap.defaults
-umap.feature_extraction$n_components <- 100
+umap.feature_extraction$n_components <- 10
 
 umap_exp_features <- expression %>% 
   semi_join(allocation %>% mutate(cosmic_id = as.character(cosmic_id))) %>%

@@ -10,19 +10,108 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
+library(tidyverse)
 library(rlearner)
 library(randomizr)
+library(here)
 ```
 
 ```{r}
-allocation <- read_csv(here("data/allocation.csv"))
+allocation <- read_csv(here("data/allocation.csv")) %>% mutate(cosmic_id = as.character(cosmic_id))
+covariates <- read_csv(here("data/covariates.csv")) %>% mutate(cosmic_id = as.character(cosmic_id))
+
 load(here("data/crxg_map_imputed.Rdata"))
+load(here("data/mutation.Rdata"))
+load(here("data/expression.Rdata"))
+load(here("data/cnv.Rdata"))
+
 ```
+
+I source a set of functions, I will aggregate all of this in a package later. 
+
+```{r, message=FALSE}
+list.files(here("R"), full.names = TRUE) %>% lapply(source)
+```
+
+
+Similar to many causal inference problems, we have three datasets: unit covariates *X*, assignment *w* and responses *y*. 
+
+First, I create a harmonized group of datasets. 
+
+```{r}
+# I define my covariate data
+X_raw <- mutation %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+ inner_join(expression %>% mutate(cosmic_id = as.character(cosmic_id))) %>% # flagged
+  inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>%  # flagged
+  inner_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)))
+
+
+# I filter the dataset so the data is complete for every unit
+y_complete <- crxg_map_imputed %>% 
+  semi_join(X, by = "cosmic_id") %>% 
+  semi_join(allocation, by = "cosmic_id")
+
+X_raw <- X_raw %>% 
+  semi_join(crxg_map_imputed, by = "cosmic_id") %>% 
+  semi_join(allocation, by = "cosmic_id")
+
+w <- allocation %>% 
+  semi_join(X, by = "cosmic_id") %>% 
+  semi_join(crxg_map_imputed, by = "cosmic_id")
+
+```
+
+## Dimensionality reduction of covariates
+
+As noted below, we will provide the treatment propensities to the R-Learner 
+
+```{r}
+library(umap)
+
+umap.feature_extraction <- umap.defaults
+umap.feature_extraction$n_components <- 20
+
+X_umap <- X %>%
+  dplyr::select(-cosmic_id) %>% 
+  mutate_all(funs(as.numeric)) %>%
+  umap::umap(config = umap.feature_extraction)
+```
+
+```{r}
+X <- X_umap$layout %>% 
+  cbind(cosmic_id = X$cosmic_id) %>%
+  as_tibble()
+```
+
+
+```{r}
+df <- X_umap$layout[,c(1,20)] %>%
+  cbind(cosmic_id = X$cosmic_id) %>%
+  as_tibble() %>%
+  mutate(V1 = as.numeric(V1),
+         V2 = as.numeric(V2))
+
+df%>%
+  ggplot(aes(V1, V2)) + 
+  geom_point() + 
+  theme_classic() + 
+  theme(legend.position = "none")
+```
+
+
+```{r}
+X_umap$layout %>% t() %>%
+  pheatmap::pheatmap(cluster_rows = TRUE, cluster_cols = TRUE,
+                     filename = "umap.pdf", width = 4, height = 3)
+```
+
 
 
 The R-Learner is per default designed to evaluate the CATE of binary treatments. That means, a unit is either treated with a control of an intervention. In our case, we will define a central control arm, Cisplatin, which is commonly used in cases in which no further information about a malignant tumor is available (CUP Syndrome). 
 
 For each treatment, we will train a two-step R-learner and estimate the CATE for the targeted agent vs. Cisplatin. 
+
+Performing this type of star-schema analysis comes with a number of constraints. First, the model will be trained on a smaller number of cases and will likely be less generalizable to CATE estimation problems involving other therapies. Second, this way of analysis does not allow epsilon to be greater than 0, especially if we plan to supply the treatment propensities to the R-Learner.
 
 We define three functions around the R-learner: 
 1. A function that estimates the *w* parameter for weighted allocation
@@ -31,107 +120,186 @@ We define three functions around the R-learner:
 1. A function that will collect the predicted CATEs for each treatment arm and calculate an aggregated performance metric
 
 ```{r}
-estimate_cross <- function(allocation, 
-                       epsilon = 0.05, 
-                       ctrl_name = "cisplatin"){
-# calculating proportions
-df <- allocation %>% 
-    gather(assignment, drug, -cosmic_id) %>% 
-    filter(drug == 1) %>% 
-    count(assignment) %>% 
-    mutate(total = sum(n),
-           w = n/total,
-           type = if_else(assignment == ctrl_name, "ctrl", "treatment")) %>% 
-    dplyr::select(-total)
-
-# estimating gamma
-g <- df %>% 
-  filter(type == "ctrl") %>% 
-  .$w # in this case 1- the cummulative w
-g <- g*epsilon
-
-# calculating cross_in and cross_over
-df %>% filter(type != "ctrl")  %>% 
-  mutate(gamma = g) %>%
-  mutate(epsilon = epsilon) %>%
-  dplyr::select(-type) %>% 
-  mutate(cross_in = gamma*w,
-         cross_over = epsilon*w) %>%
-    return()
-}
-
-estimate_cross(allocation) # %>% knitr::kable()
+estimate_cross(w, epsilon = 0, gamma = 1, omega = 0.1) # %>% knitr::kable()
 ```
 
 ```{r}
-cross <- estimate_cross(allocation) # %>% knitr::kable()
+re_allocate(w, epsilon = 0, gamma = 0.5, omega = 0.5, ctrl = "cisplatin", return_propensity = FALSE) %>% 
+  mutate(same = assignment == re_assignment)
+```
 
-reassign <- function(var, ctrl = "cisplatin", cross_probs){
-  if(var != ctrl){
-    # define probs and variables
-    probs = c(cross_probs %>% filter(assignment != var) %>% .$cross_over)
-    probs = c(1-sum(probs), probs)
-    reassignment = c(cross_probs %>% filter(assignment != var) %>%  .$assignment)
-    reassignment = c(var, reassignment)
-    # return output 
-    simple_ra(N = 1, prob_each = probs, conditions= reassignment) %>% 
-      as.character() %>% 
-      return()
-  }
-  else if(var == ctrl){
-    # define probs and variables
-    probs = c(cross_probs %>% filter(assignment != var) %>% .$cross_in)
-    probs = c(1-sum(probs), probs)
-    reassignment = c(cross_probs %>% filter(assignment != var) %>%  .$assignment)
-    reassignment = c(var, reassignment)
-    # return output 
-    simple_ra(N = 1, prob_each = probs, conditions= reassignment) %>% 
-      as.character() %>% 
-      return()
-  }
-  else {"someting is broken"}
-}
 
-re_allocation <- allocation %>% 
-    gather(assignment, drug, -cosmic_id) %>% 
-    filter(drug == 1) %>% 
-  dplyr::select(- drug) %>% 
-  nest(-cosmic_id) %>%
-  mutate(new = purrr::map(data, ~ .x %>% mutate(re_assignment = reassign(assignment, cross_probs = cross)))) %>% 
+```{r}
+draw_interval = 0.05
+n_draws = 5
+
+x = rep(seq(0,1, draw_interval), each = n_draws)
+
+allocation_dynamics_gamma <-  x %>% #gamma is scaling automatically
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", epsilon = 0, omega = 0, return_propensity =FALSE) %>% 
+  bind_rows() %>% 
+  cbind(., gamma = rep(x, each = nrow(w))) %>%
+  as_tibble() 
+
+allocation_dynamics_gamma_count <- allocation_dynamics_gamma %>%
+  count(gamma, re_assignment) %>% 
+  mutate(n = n/n_draws)
+
+allocation_dynamics_gamma_count %>% 
+  ggplot(aes(gamma, n, color = re_assignment)) + 
+  geom_point() + 
+  geom_line() +
+  theme_classic() + 
+  scale_color_brewer(type = "qual") + 
+   scale_y_log10(limits = c(1, 1000)) +
+  labs(x = "Cross-In rate",
+       y = "Number of units per treatment",
+       title = "Treatment assignment by Cross-In rate",
+       subtitle = "Cisplatin is the control group",
+       caption = "Cross-In rate gamma, 20 draws",
+       color = "Treatment") + 
+  ggsave("gamma.pdf", width = 5, height = 4)
+```
+
+```{r}
+draw_interval = 0.05
+n_draws = 5
+
+x = rep(seq(0,1, draw_interval), each = n_draws)
+
+allocation_dynamics_epsilon <-  x %>% #gamma is scaling automatically
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", gamma = 0, omega = 0,return_propensity =FALSE) %>% 
+  bind_rows() %>% 
+  cbind(., epsilon = rep(x, each = nrow(w))) %>%
+  as_tibble() 
+
+allocation_dynamics_epsilon_count <- allocation_dynamics_epsilon %>%
+  count(omega, re_assignment) %>% 
+  mutate(n = n/n_draws)
+
+allocation_dynamics_epsilon_count %>% 
+  ggplot(aes(epsilon, n, color = re_assignment)) + 
+  geom_point() + 
+  geom_line() +
+  theme_classic() + 
+  scale_color_brewer(type = "qual") + 
+   scale_y_log10(limits = c(1, 1000)) +
+  labs(x = "Cross-Over rate",
+       y = "Number of units per treatment",
+       title = "Treatment assignment by Cross-Over rate",
+       subtitle = "Cisplatin is the control group",
+       caption = "Cross-In rate epsilon, 20 draws",
+       color = "Treatment") + 
+  ggsave("epsilon.pdf", width = 5, height = 4)
+```
+
+```{r}
+draw_interval = 0.05
+n_draws = 5
+
+x = rep(seq(0,1, draw_interval), each = n_draws)
+
+allocation_dynamics_omega <-  x %>% #gamma is scaling automatically
+  parallel::mclapply(., re_allocate, allocation = w, ctrl= "cisplatin", epsilon = 0, gamma = 0,return_propensity =FALSE) %>%
+  bind_rows() %>% 
+  cbind(., omega = rep(x, each = nrow(w))) %>%
+  as_tibble() 
+
+allocation_dynamics_omega_count <- allocation_dynamics_omega %>%
+  count(omega, re_assignment) %>% 
+  mutate(n = n/n_draws)
+
+allocation_dynamics_omega_count %>% 
+  ggplot(aes(omega, n, color = re_assignment)) + 
+  geom_point() + 
+  geom_line() +
+  theme_classic() + 
+  scale_color_brewer(type = "qual") + 
+  scale_y_log10(limits = c(1, 1000)) +
+  labs(x = "Cross-Out rate",
+       y = "Number of units per treatment",
+       title = "Treatment assignment by Cross-Out rate",
+       subtitle = "Cisplatin is the control group",
+       caption = "Cross-Out rate omega, 20 draws",
+       color = "Treatment") + 
+  ggsave("omega.pdf", width = 5, height = 4)
+```
+
+
+In case of a star-schema analysis, I need to introduce a third parameter, a cross-out rate omega. This parameter describes the rate at which a unit that matched a therapeutic protocol, after applying the cross_over rate,  is allocated into the control arm. Otherwise, these units had a treatment propensity for the control treatment of 0, thereby violating the positivity assumption.
+
+# Create 2x2 tables of reassignments 
+
+```{r}
+# I focus on one representative treatment, Trametinib 
+# I then test different configurations of gamma and omega
+# I visualize the final assignment and the initial assignment as a 2x2 table 
+gamma_count <- expand.grid(gamma = rep(seq(0.1,0.9, 0.2), each = 1),
+            omega = rep(seq(0.1,0.9, 0.2), each = 1)) %>% 
+  mutate(new = furrr::future_map2(gamma, omega, ~ re_allocate(allocation = w,
+                                                              gamma = .x,
+                                                              omega = .y,
+                                                              ctrl= "cisplatin", 
+                                                              epsilon = 0,
+                                                              return_propensity =FALSE)))
+
+gamma_count_df <- gamma_count %>% 
   unnest(new) %>% 
-  dplyr::select(-data) %>% 
-  arrange(cosmic_id)
+  filter(assignment %in% c("cisplatin", "trametinib"),
+         re_assignment %in% c("cisplatin", "trametinib")) %>% 
+  count(assignment, re_assignment, gamma, omega) %>% 
+  arrange(gamma) %>% 
+  nest(-gamma, -omega) %>% 
+  mutate(data = map(data, ~ .x %>% mutate(percent = n/sum(n)*100)))
+
+# gamma_count_mat <- gamma_count %>% 
+#   mutate(matrix = map(data, ~ .x %>% complete(assignment, re_assignment, fill = list(n = 0)) %>% 
+#   spread(re_assignment, n) %>% 
+#   as.data.frame() %>% 
+#   tibble::column_to_rownames("assignment") %>% 
+#   as.matrix()))
+
+gamma_count_df %>% 
+  unnest() %>% 
+  mutate(n_log = log10(n)) %>%
+  ggplot(aes(assignment, re_assignment, fill = n_log)) + 
+  geom_tile() + 
+  geom_text(aes(label = round(percent, 0)), color = "white") + 
+  facet_grid(gamma ~ omega) + 
+  scale_fill_viridis_c() + 
+  theme_minimal() + 
+  labs(x = "Initial assignment",
+       y = "Final assignment",
+       title = "Treatment assignment by Cross-Out and Cross-In rate",
+       subtitle = "Percent units in white, Cisplatin is the control group",
+       caption = "Cross-Out rate omega and Cross-In rate gamma, 5 draws",
+       fill = "Number of units\n(log-scale)") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggsave("heatmap_allocation.pdf", width = 7, height = 6)
 ```
 
-After defining a function to perform weighted reassignments, I have to generate result vectors based on a given reassignment. 
+
+After defining a function to perform weighted reassignments, I have to generate result vectors based on a given reassignment. The function name is *create_y*. 
+
+Now 
 
 ```{r}
-create_y <- function(allocation_in, response, var, ctrl = "cisplatin"){
-  response %>%
-  mutate(cosmic_id = as.character(cosmic_id)) %>%
-  semi_join(list$df,  by = "cosmic_id") %>%
-  dplyr::select(-cosmic_id) %>% 
-  
-  mutate_all(funs(as.character)) %>%
-  mutate_all(funs(as.numeric)) %>%
-  as.matrix()
-
-}
-```
-
-
-```{r}
-train_rlearner <- function(allocation_in, features, response, var, ctrl = "cisplatin"){
+feed_rlearner <- function(allocation_in, features, response, var, ctrl = "cisplatin", split = 0.8){
+  # I create a list to organize elements in the function
 list <- list()
+
+list$var = var
+list$ctrl = ctrl 
 
 var_q <- sym(var)
 ctrl_q <- sym(ctrl)
 
-
-list$df <- allocation_in %>% 
+list$df <- allocation_in$re_allocation %>% 
   mutate(cosmic_id = as.character(cosmic_id)) %>%
   semi_join(response, by = "cosmic_id") %>%
   filter(re_assignment == var |  re_assignment == ctrl) %>% 
+  # In our current scenario, we can only consider cases that were included in either the treatment of interest of ctrl arm
+  filter(assignment == var |  assignment == ctrl) %>% 
   mutate(logical = if_else(re_assignment == ctrl, 0, 1),
          cosmic_id = as.character(cosmic_id))
 
@@ -161,17 +329,481 @@ list$y <- response %>%
   .$y
 
 
-list$rlasso_fit = rlasso(list$x, list$w, list$y)
-list$rlasso_est = predict(list$rlasso_fit, list$x)
+list$p <- list$df %>% mutate(initial_logical = if_else(re_assignment == ctrl, 0, 1)) %>% 
+  mutate(p_hat = if_else(initial_logical == 1, 
+                         1-(allocation_in$cross %>% filter(assignment == var) %>% .$cross_out), 
+                         allocation_in$cross %>% filter(assignment == var) %>% .$cross_in)) %>% 
+  .$p_hat
 
-list$rboost_fit = rboost(list$x, list$w, list$y)
-list$rboost_est = predict(list$rboost_fit, list$x)
+list$index <- c(1:length(list$w)) %>% sample(., size = round(length(.)*split, 1))
 
 return(list)
 }
 
-out <- train_rlearner(re_allocation, X, crxg_map_imputed, var = "afatinib", ctrl = "cisplatin")
 
+train_rlearner <- function(list, estimate_phat = TRUE){
+  if(estimate_phat == TRUE){
+  # running the rlearner
+list$rlasso_fit = rlasso(list$x[list$index,], list$w[list$index], list$y[list$index])
+list$rlasso_est = predict(list$rlasso_fit, list$x[-list$index,])
+
+list$rboost_fit = rboost(list$x[list$index,], list$w[list$index], list$y[list$index])
+list$rboost_est = predict(list$rboost_fit, list$x[-list$index,])
+
+return(list)
+} else if(estimate_phat == FALSE){
+  # running the rlearner
+list$rlasso_fit = rlasso(list$x[list$index,], list$w[list$index], list$y[list$index], p_hat = list$p[list$index])
+list$rlasso_est = predict(list$rlasso_fit, list$x[-list$index,])
+
+list$rboost_fit = rboost(list$x[list$index,], list$w[list$index], list$y[list$index], p_hat = list$p[list$index])
+list$rboost_est = predict(list$rboost_fit, list$x[-list$index,])
+
+return(list)
+}
+}
+
+
+out <- re_allocate(w, epsilon = 0, gamma = 0.6, omega = 0.25, ctrl = "cisplatin") %>% 
+  feed_rlearner(., X, y_complete, var = "afatinib", ctrl = "cisplatin") %>% 
+  train_rlearner(., estimate_phat = FALSE)
+
+```
+
+
+* grid search omega and gamma
+
+Measuring the PEHE for treatment effects.
+
+Different from the initial proposal, I did not modify the PEHE function for a reference-free context. Instead, as described above, I decided to pick a reference treatment, cisplatin.
+
+```{r}
+estimate_pehe <- function(rlearner_model, response = y_complete){
+  var_q <- sym(rlearner_model$var)
+  ctrl_q <- sym(rlearner_model$ctrl)
+  
+  rlearner_model$df[-rlearner_model$index,] %>% 
+    left_join(response, by = "cosmic_id") %>%
+    dplyr::select(cosmic_id, !!var_q, !!ctrl_q, assignment, re_assignment, logical) %>%
+    mutate(tau = !!var_q-!!ctrl_q) %>% 
+    mutate(tau_hat_lasso = rlearner_model$rlasso_est) %>% 
+    mutate(tau_hat_boost = rlearner_model$rboost_est) %>% 
+    mutate(pehe_lasso = (tau_hat_lasso - tau)^2,
+           pehe_boost = (tau_hat_boost - tau)^2) %>% 
+    mutate(var = rlearner_model$var,
+           ctrl = rlearner_model$ctrl) %>%
+    return()
+}
+
+estimate_pehe(out) %>% 
+  group_by(re_assignment, var) %>% 
+  summarise(pehe_lasso_sd = sd(pehe_lasso),
+            pehe_boost_sd = sd(pehe_boost),
+            pehe_lasso = mean(pehe_lasso),
+            pehe_boost = mean(pehe_boost))
+```
+
+
+```{r}
+estimate_pehe(out) %>% 
+  mutate(logical = factor(logical)) %>%
+  ggplot(aes(tau, tau_hat_lasso, color = re_assignment )) + 
+  geom_point()
+```
+
+
+# Iterate R-Learner 
+
+
+```{r}
+iterate_rlearner <- function(gamma_omega, var_in){
+  params <- gamma_omega %>% str_split(pattern = "_") %>% unlist() %>% as.numeric()
+  gamma <- params[1]
+  omega <- params[2]
+  
+  result <- re_allocate(w, epsilon = 0, gamma = gamma, omega = omega, ctrl = "cisplatin") %>% 
+  feed_rlearner(., X, y_complete, var = var_in, ctrl = "cisplatin") %>% 
+    train_rlearner(., estimate_phat = FALSE) 
+  
+  result %>%
+    saveRDS(here(paste0("data/", gamma_omega, "_", var_in, "_", Sys.time(), ".Rds")))
+  
+  return(result)
+}
+
+rlearner_grid <- expand.grid(gamma = rep(seq(0,1, 0.05), each = 1),
+                                omega = rep(seq(0,1, 0.05), each = 1),
+                                drug = w[,-1] %>% colnames()) %>% 
+  filter(gamma != 0, gamma != 1) %>% 
+  filter(omega != 0, omega != 1) %>%
+  filter(drug != "cisplatin") %>% 
+  #filter(!(drug %in% c("afatinib", "dabrafenib", "olaparib"))) %>%
+  mutate(drug = as.character(drug)) %>%
+  mutate(gamma_omega = paste0(gamma, "_", omega)) 
+
+tmp <- rlearner_grid %>%
+  mutate(data = map2(gamma_omega,drug, ~ iterate_rlearner(gamma_omega = .x, var_in = .y))) %>% 
+  mutate(pehe = map(data, ~ estimate_pehe(.x)))
+```
+
+I collect data 
+
+```{r}
+rlearner_grid_result <- tibble(path = list.files(here("data"), pattern = "2019-04", full.names = TRUE),
+       name = list.files(here("data"), pattern = "2019-04")) %>% 
+  rowwise() %>%
+  mutate(gamma = str_split(name, pattern = "_") %>% unlist() %>% .[1] %>% as.numeric(),
+         omega = str_split(name, pattern = "_") %>% unlist() %>% .[2] %>% as.numeric(),
+         drug = str_split(name, pattern = "_") %>% unlist() %>% .[3],
+         time = str_split(name, pattern = "_") %>% unlist() %>% .[4] %>% substr(1, nchar(.)-4)) %>% 
+  ungroup() %>%
+  mutate(rlearner = map(path, ~ readRDS(.x)))
+
+rlearner_grid_result_pehe <- rlearner_grid_result %>% 
+  mutate(pehe = map(rlearner, ~ estimate_pehe(.x)),
+         metrics = map(pehe, ~ .x %>% group_by(re_assignment, var) %>% 
+                         summarise(pehe_lasso_sd = sd(pehe_lasso),
+                         pehe_boost_sd = sd(pehe_boost),
+                         pehe_lasso = mean(pehe_lasso),
+                         pehe_boost = mean(pehe_boost)))) 
+  
+
+## I collect the same data for a UMAP-transformed X, including gene expression data and CNVs
+rlearner_grid_result_umap <- tibble(path = list.files(here("data"), pattern = "2019-05", full.names = TRUE),
+       name = list.files(here("data"), pattern = "2019-05")) %>% 
+  rowwise() %>%
+  mutate(gamma = str_split(name, pattern = "_") %>% unlist() %>% .[1] %>% as.numeric(),
+         omega = str_split(name, pattern = "_") %>% unlist() %>% .[2] %>% as.numeric(),
+         drug = str_split(name, pattern = "_") %>% unlist() %>% .[3],
+         time = str_split(name, pattern = "_") %>% unlist() %>% .[4] %>% substr(1, nchar(.)-4)) %>% 
+  ungroup() %>%
+  mutate(rlearner = map(path, ~ readRDS(.x)))
+
+rlearner_grid_result_pehe_umap <- rlearner_grid_result_umap %>% 
+  mutate(pehe = map(rlearner, ~ estimate_pehe(.x)),
+         metrics = map(pehe, ~ .x %>% group_by(var) %>% 
+                         summarise(pehe_lasso_sd = sd(pehe_lasso),
+                         pehe_boost_sd = sd(pehe_boost),
+                         pehe_lasso = mean(pehe_lasso),
+                         pehe_boost = mean(pehe_boost)))) 
+```
+
+
+```{r}
+df <- rlearner_grid_result_pehe_umap %>% 
+  unnest(metrics) %>%
+  dplyr::select(pehe_lasso, pehe_boost, pehe_boost_sd, pehe_lasso_sd, drug, re_assignment, gamma, omega) %>%
+  mutate(re_assignment = if_else(re_assignment == "cisplatin", "ctrl", "treatment")) %>% 
+  gather(method, pehe, -(pehe_boost_sd:omega)) %>% 
+  gather(method_sd, pehe_sd, -(drug:pehe))
+  
+
+df %>% 
+  ggplot(aes(gamma, pehe, color = method)) + 
+  geom_point() + 
+  facet_grid(re_assignment ~ drug) + 
+  scale_y_log10() + 
+  theme_bw()
+```
+
+
+
+# Defining clinical regret 
+
+What is the value of this CI? 
+
+I calculate the baseline regret that would exist if cell lines would be allocated by their initial therpeutic protocol only.
+
+```{r}
+return_standard_regret <- function(var, ctrl = "cisplatin", response = y_complete){
+
+var_q <- sym(var)
+ctrl_q <- sym(ctrl)
+
+df <- re_allocate(w, epsilon = 0, gamma = 0, omega = 0, ctrl = "cisplatin") %>% 
+  feed_rlearner(., X, y_complete, var = var, ctrl = ctrl) %>% 
+  .$df %>% 
+  left_join(response, by = "cosmic_id") %>%
+    dplyr::select(cosmic_id, !!var_q, !!ctrl_q, assignment, re_assignment, logical) %>%
+    mutate(tau = !!var_q-!!ctrl_q) %>% 
+  mutate(regret = if_else((logical == 0 & tau < 0) | (logical == 1 & tau > 0), tau, 0))
+
+sum(abs(df$regret)) %>% return()
+}
+
+standard_regret <- tibble(drug = rlearner_regret_umap$drug %>% unique()) %>% 
+  mutate(standard_regret = map(drug, ~ return_standard_regret(.x))) %>% 
+  unnest(standard_regret)
+
+standard_regret
+```
+
+I also create a function to measure the protocol regret. 
+
+```{r}
+return_protocol_regret <- function(rlearner_model, response = y_complete){
+
+var_q <- sym(rlearner_model$var)
+ctrl_q <- sym(rlearner_model$ctrl)
+
+df <- rlearner_model$df[rlearner_model$index,] %>% 
+    left_join(response, by = "cosmic_id") %>%
+    dplyr::select(cosmic_id, !!var_q, !!ctrl_q, assignment, re_assignment, logical) %>%
+    mutate(tau = !!var_q-!!ctrl_q) %>% 
+    mutate(var = rlearner_model$var,
+           ctrl = rlearner_model$ctrl) %>%
+    mutate(regret = if_else((logical == 0 & tau < 0) | (logical == 1 & tau > 0), tau, 0))
+
+sum(abs(df$regret)) %>% return()
+}
+
+protocol_regret <- rlearner_grid_result_pehe_umap %>% 
+  mutate(protocol_regret = map(rlearner, ~ .x %>% return_protocol_regret)) %>% 
+  dplyr::select(name, protocol_regret) %>% 
+  unnest(protocol_regret)
+
+```
+
+Depending on the CATE estimate, we can direct a given unit either into the ctrl of treatment arm. We then can estimate the difference in response 
+
+```{r}
+rlearner_regret_umap <- rlearner_grid_result_pehe_umap %>% 
+  unnest(pehe) %>%
+  mutate(tau_treatment = tau < 0, # the treatment was more effective
+         tau_hat_lasso_treatment = tau_hat_lasso < 0, # the lasso model suggests that the treatment is more effective 
+         tau_hat_boost_treatment = tau_hat_boost < 0) %>% 
+  mutate(lasso_regret = ifelse(tau_treatment != tau_hat_lasso_treatment, tau, 0), # give regret if prediction is wrong
+         boost_regret = ifelse(tau_treatment != tau_hat_boost_treatment, tau, 0),
+         # Protocol regret is the regret caused by reassigning the patients into treatment arms, that are not part of the therapeutic protocol
+         #protocol_regret = ifelse((logical == 0 & tau < 0) | (logical == 1 & tau > 0), tau, 0), 
+         #reassignment_regret = ifelse(assignment != re_assignment & logical == 0 & tau < 0, tau, 0),
+         #protocol_regret_minus_lasso = protocol_regret - lasso_regret,
+         #protocol_regret_minus_boost = protocol_regret - boost_regret,
+         #baseline_regret = ifelse((assignment == "cisplatin" & tau < 0) | (assignment != "cisplatin" & tau > 0), tau, 0)
+         ) %>% # special case in which patient was reassigned
+  group_by(gamma, omega, drug, time, name) %>% 
+  summarise(lasso_regret = sum(abs(lasso_regret)),
+            boost_regret = sum(abs(boost_regret)),
+            #protocol_regret = sum(abs(protocol_regret)),
+            #reassignment_regret = sum(abs(reassignment_regret)),
+            #protocol_regret_minus_lasso = protocol_regret - lasso_regret,
+            #protocol_regret_minus_boost = protocol_regret - boost_regret,
+            #baseline_regret = sum(abs(baseline_regret))
+            ) %>% 
+  left_join(standard_regret, by = "drug") %>% 
+  left_join(protocol_regret, by = "name") %>% 
+  mutate(regret_reduction_lasso = (lasso_regret+protocol_regret)-standard_regret,
+         regret_reduction_boost = (boost_regret+protocol_regret)-standard_regret)
+  
+
+```
+
+
+
+```{r}
+rlearner_regret_umap %>% 
+  gather(type, regret, -gamma, -omega, -drug, -time, -name) %>%
+  filter(type != "regret_reduction_lasso",
+         type != "regret_reduction_boost",
+         type != "standard_regret",
+         type != "protocol_regret") %>%
+  ggplot(aes(gamma, omega, fill = regret)) + 
+  geom_tile() + 
+  facet_grid(drug ~ type) + 
+  scale_fill_viridis_c() + 
+  theme_minimal() + 
+  labs(x = "Cross-In rate",
+       y = "Cross-Out rate",
+       title = "Cummulative regret by Cross-Out and Cross-In rate",
+       subtitle = "Two CATE estimation methods, Cisplatin is the control group",
+       caption = "Cross-Out rate omega and Cross-In rate gamma, 20 draws",
+       fill = "Cummulative Regret") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggsave("heatmap_regret_cate.pdf", width = 5.5, height =10)
+```
+
+```{r}
+rlearner_regret_umap %>% 
+  gather(type, regret, -gamma, -omega, -drug, -time, -name) %>%
+  filter(type == "protocol_regret") %>%
+  ggplot(aes(gamma, omega, fill = regret)) + 
+  geom_tile() + 
+  facet_grid(drug ~ type) + 
+  scale_fill_viridis_c() +
+  theme_minimal() + 
+  labs(x = "Cross-In rate",
+       y = "Cross-Out rate",
+       title = "Protocol regret by Cross-Out and Cross-In rate",
+       subtitle = "Cisplatin is the control group",
+       caption = "Cross-Out rate omega and Cross-In rate gamma, 20 draws",
+       fill = "Cummulative Regret") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggsave("heatmap_regret_protocol.pdf", width = 4.0 , height =10)
+```
+
+
+```{r}
+rlearner_regret_umap %>% 
+  gather(type, regret, -gamma, -omega, -drug, -time, -name) %>%
+  filter(type == "regret_reduction_lasso" |
+         type == "regret_reduction_boost") %>%
+  ggplot(aes(gamma, omega, fill = regret)) + 
+  geom_tile() + 
+  facet_grid(drug ~ type) + 
+  scale_fill_gradient2() + 
+  theme_minimal() + 
+  labs(x = "Cross-In rate",
+       y = "Cross-Out rate",
+       title = "Overall reduction of regret by Cross-Out and Cross-In rate",
+       subtitle = "Two CATE estimation methods, Cisplatin is the control group",
+       caption = "Cross-Out rate omega and Cross-In rate gamma, 20 draws",
+       fill = "Regret Reduction\ncompared to current standard") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggsave("heatmap_regret_reduction.pdf", width = 6 , height =10)
+```
+
+```{r}
+rlearner_grid_result_pehe_umap %>% 
+  
+  unnest(metrics) %>% 
+  dplyr::select(gamma, omega, drug,  pehe_lasso, pehe_boost) %>%
+  gather(type, pehe, -gamma, -omega, -drug) %>%
+  mutate(log_pehe = log10(pehe)) %>%
+  ggplot(aes(gamma, omega, fill = log_pehe)) + 
+  geom_tile() + 
+  facet_grid(drug ~ type) + 
+  scale_fill_viridis_c() + 
+  theme_minimal() + 
+  labs(x = "Cross-In rate",
+       y = "Cross-Out rate",
+       title = "Average PEHE by Cross-Out and Cross-In rate",
+       subtitle = "Two CATE estimation methods, Cisplatin is the control group",
+       caption = "Cross-Out rate omega and Cross-In rate gamma, 20 draws",
+       fill = "Average PEHE\n(log-scale)") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggsave("heatmap_pehe.pdf", width = 5.2 , height =10)
+  
+```
+
+
+
+```{r}
+df %>% 
+  ggplot(aes(omega, pehe, color = method)) + 
+  geom_point() + 
+  facet_grid(re_assignment ~ drug) + 
+  scale_y_log10() + 
+  theme_bw()
+```
+
+
+```{r}
+rlearner_grid_result_pehe %>%
+  unnest(pehe) %>% 
+  mutate(re_assignment = if_else(re_assignment == "cisplatin", "ctrl", "treatment")) %>% 
+  group_by(gamma, omega, drug, re_assignment) %>% 
+  summarise(var_lasso = var(tau_hat_lasso),
+            var_boost = var(tau_hat_boost)) %>% 
+  gather(method, var, -(gamma:re_assignment)) %>% 
+  ggplot(aes(omega, var, color = method)) + 
+  geom_point() + 
+  facet_grid(re_assignment ~ drug) + 
+  theme_bw() + scale_y_sqrt()
+```
+
+
+```{r}
+rlearner_grid_result_pehe %>%
+  unnest(pehe) %>% 
+  mutate(re_assignment = if_else(re_assignment == "cisplatin", "ctrl", "treatment")) %>% 
+  group_by(gamma, omega, drug, re_assignment) %>% 
+  summarise(var_lasso = var(tau_hat_lasso) %>% sqrt(),
+            var_boost = var(tau_hat_boost) %>% sqrt()) %>% 
+  gather(method, var, -(gamma:re_assignment)) %>% 
+  mutate(var_zero = if_else(var == 0, "zero","non-zero")) %>%
+  filter(var_zero == "zero") %>%
+  filter(method == "var_lasso") %>%
+  ggplot(aes(omega, gamma, color = var_zero)) + 
+  geom_point() + 
+  #facet_grid(re_assignment ~ drug) + 
+  theme_bw() 
+```
+
+```{r}
+rlearner_grid_result_pehe %>%
+  unnest(pehe) %>% 
+  mutate(re_assignment = if_else(re_assignment == "cisplatin", "ctrl", "treatment")) %>% 
+  filter(gamma == 0.5, omega == 0.5) %>% 
+  ggplot(aes(tau_hat_lasso, tau, color = re_assignment)) + 
+  geom_point() + 
+  theme_bw() + 
+  facet_grid(~ drug )
+```
+
+
+
+```{r}
+rlearner_grid_result_pehe_umap %>%
+  unnest(pehe) %>% 
+  group_by(gamma, omega, drug, re_assignment) %>% 
+  summarise(var_lasso = var(tau_hat_lasso),
+            var_boost = var(tau_hat_boost))  %>%
+  dplyr::select(-re_assignment) %>%
+  gather(type, var, -drug, -omega, -gamma) %>% 
+  mutate(var = sqrt(var)) %>%
+  ggplot(aes(gamma, omega, fill = var)) + 
+  geom_tile() + 
+  facet_grid(drug ~ type) + 
+  scale_fill_viridis_c() + 
+  theme_minimal() + 
+  labs(x = "Cross-In rate",
+       y = "Cross-Out rate",
+       title = "Average Variance of Tau-estimate by Cross-Out and Cross-In rate",
+       subtitle = "Two CATE estimation methods, Cisplatin is the control group",
+       caption = "Cross-Out rate omega and Cross-In rate gamma, 20 draws",
+       fill = "Variance of Tau\n(sqrt)") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggsave("heatmap_var_tau.pdf", width = 5.2 , height =10)
+```
+
+```{r}
+  
+```
+
+
+
+```{r}
+rlearner_grid$pehe[[1]] %>% 
+  ggplot(aes(tau_hat_lasso, tau, color = re_assignment)) + 
+  geom_point() + 
+  theme_classic()
+```
+
+
+
+```{r}
+estimate_pehe(out) %>% .$pehe_boost %>% hist()
+```
+
+```{r}
+out <- re_allocate(w, epsilon = 0.5, ctrl = "cisplatin") %>% 
+  train_rlearner(., X, y_complete, var = "trametinib", ctrl = "cisplatin")
+```
+
+The performance of the rlearner is far from optimal. I start troubleshooting. 
+
+```{r}
+out$rlasso_est %>% hist()
+```
+
+
+
+```{r}
+y_complete %>% 
+  ggplot(aes(trametinib, cisplatin)) + 
+  geom_point() + 
+  theme_classic() + 
+  labs(title = "Association of Cisplatin and Trametinib response")
 ```
 
 
