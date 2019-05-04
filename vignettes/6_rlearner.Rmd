@@ -25,6 +25,10 @@ load(here("data/mutation.Rdata"))
 load(here("data/expression.Rdata"))
 load(here("data/cnv.Rdata"))
 
+X <- read_csv(here("data/X_umap.csv"))
+w <- read_csv(here("data/X_umap.csv"))
+y_complete <- read_csv(here("data/y_complete.csv"))
+
 ```
 
 I source a set of functions, I will aggregate all of this in a package later. 
@@ -35,111 +39,6 @@ list.files(here("R"), full.names = TRUE) %>% lapply(source)
 
 
 Similar to many causal inference problems, we have three datasets: unit covariates *X*, assignment *w* and responses *y*. 
-
-First, I create a harmonized group of datasets. 
-
-```{r}
-# I define my covariate data
-X_raw <- mutation %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
- inner_join(expression %>% mutate(cosmic_id = as.character(cosmic_id))) %>% # flagged
-  inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>%  # flagged
-  inner_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)))
-
-
-# I filter the dataset so the data is complete for every unit
-y_complete <- crxg_map_imputed %>% 
-  semi_join(X_raw, by = "cosmic_id") %>% 
-  semi_join(allocation, by = "cosmic_id")
-
-X_raw <- X_raw %>% 
-  semi_join(crxg_map_imputed, by = "cosmic_id") %>% 
-  semi_join(allocation, by = "cosmic_id")
-
-w <- allocation %>% 
-  semi_join(X_raw, by = "cosmic_id") %>% 
-  semi_join(crxg_map_imputed, by = "cosmic_id")
-
-```
-
-## Dimensionality reduction of covariates
-
-As noted below, we will provide the treatment propensities to the R-Learner 
-
-```{r}
-library(umap)
-
-umap.feature_extraction <- umap.defaults
-umap.feature_extraction$n_components <- 20
-
-X_umap <- X_raw %>%
-  dplyr::select(-cosmic_id) %>% 
-  mutate_all(funs(as.numeric)) %>%
-  umap::umap(config = umap.feature_extraction)
-```
-
-```{r}
-X <- X_umap$layout %>% 
-  cbind(cosmic_id = X_raw$cosmic_id) %>%
-  as_tibble()
-```
-
-```{r}
-X %>% write_csv(here("data/X_umap.csv"))
-```
-
-
-```{r}
-y_regret <- y_complete %>% 
-  gather(treatment, response, -cosmic_id) %>% 
-  group_by(cosmic_id) %>% 
-  mutate(min = min(response)) %>% 
-  mutate(regret = (response - min)*-1) %>% 
-  dplyr::select(treatment, regret, cosmic_id) %>% 
-  spread(treatment, regret)  %>% 
-  arrange(cosmic_id)
-
-y_regret %>% 
-  write_csv(here("data/y_regret.csv"))
-
-y_regret %>% 
-  gather(treatment, regret, -cosmic_id) %>% 
-  nest(-cosmic_id) %>% 
-  mutate(new = map(data, ~ .x %>% arrange((regret)) %>% cbind(.,index = c(1:7)))) %>% 
-  unnest(new) %>% 
-  dplyr::select(cosmic_id, treatment, index) %>% 
-  spread(treatment, index)  %>% 
-  arrange(cosmic_id) %>% 
-  write_csv(here("data/y_regret_rank.csv"))
-
-perc.rank <- function(x) 1-(trunc(rank(x))/length(x))
-
-y_complete %>% 
-  mutate_at(vars(everything(), -cosmic_id), funs(perc.rank)) %>% 
-  write_csv(here("data/y_regret_percentile.csv"))
-```
-
-
-```{r}
-df <- X_umap$layout[,c(1,20)] %>%
-  cbind(cosmic_id = X$cosmic_id) %>%
-  as_tibble() %>%
-  mutate(V1 = as.numeric(V1),
-         V2 = as.numeric(V2))
-
-df%>%
-  ggplot(aes(V1, V2)) + 
-  geom_point() + 
-  theme_classic() + 
-  theme(legend.position = "none")
-```
-
-
-```{r}
-X_umap$layout %>% t() %>%
-  pheatmap::pheatmap(cluster_rows = TRUE, cluster_cols = TRUE,
-                     filename = "umap.pdf", width = 4, height = 3)
-```
-
 
 
 The R-Learner is per default designed to evaluate the CATE of binary treatments. That means, a unit is either treated with a control of an intervention. In our case, we will define a central control arm, Cisplatin, which is commonly used in cases in which no further information about a malignant tumor is available (CUP Syndrome). 
@@ -721,62 +620,6 @@ rlearner_grid_result_pehe_umap %>%
 ```
 
 
-
-```{r}
-df %>% 
-  ggplot(aes(omega, pehe, color = method)) + 
-  geom_point() + 
-  facet_grid(re_assignment ~ drug) + 
-  scale_y_log10() + 
-  theme_bw()
-```
-
-
-```{r}
-rlearner_grid_result_pehe %>%
-  unnest(pehe) %>% 
-  mutate(re_assignment = if_else(re_assignment == "cisplatin", "ctrl", "treatment")) %>% 
-  group_by(gamma, omega, drug, re_assignment) %>% 
-  summarise(var_lasso = var(tau_hat_lasso),
-            var_boost = var(tau_hat_boost)) %>% 
-  gather(method, var, -(gamma:re_assignment)) %>% 
-  ggplot(aes(omega, var, color = method)) + 
-  geom_point() + 
-  facet_grid(re_assignment ~ drug) + 
-  theme_bw() + scale_y_sqrt()
-```
-
-
-```{r}
-rlearner_grid_result_pehe %>%
-  unnest(pehe) %>% 
-  mutate(re_assignment = if_else(re_assignment == "cisplatin", "ctrl", "treatment")) %>% 
-  group_by(gamma, omega, drug, re_assignment) %>% 
-  summarise(var_lasso = var(tau_hat_lasso) %>% sqrt(),
-            var_boost = var(tau_hat_boost) %>% sqrt()) %>% 
-  gather(method, var, -(gamma:re_assignment)) %>% 
-  mutate(var_zero = if_else(var == 0, "zero","non-zero")) %>%
-  filter(var_zero == "zero") %>%
-  filter(method == "var_lasso") %>%
-  ggplot(aes(omega, gamma, color = var_zero)) + 
-  geom_point() + 
-  #facet_grid(re_assignment ~ drug) + 
-  theme_bw() 
-```
-
-```{r}
-rlearner_grid_result_pehe %>%
-  unnest(pehe) %>% 
-  mutate(re_assignment = if_else(re_assignment == "cisplatin", "ctrl", "treatment")) %>% 
-  filter(gamma == 0.5, omega == 0.5) %>% 
-  ggplot(aes(tau_hat_lasso, tau, color = re_assignment)) + 
-  geom_point() + 
-  theme_bw() + 
-  facet_grid(~ drug )
-```
-
-
-
 ```{r}
 rlearner_grid_result_pehe_umap %>%
   unnest(pehe) %>% 
@@ -801,10 +644,6 @@ rlearner_grid_result_pehe_umap %>%
   ggsave("heatmap_var_tau.pdf", width = 5.2 , height =10)
 ```
 
-```{r}
-  
-```
-
 
 
 ```{r}
@@ -817,74 +656,10 @@ rlearner_grid$pehe[[1]] %>%
 
 
 ```{r}
-estimate_pehe(out) %>% .$pehe_boost %>% hist()
-```
-
-```{r}
-out <- re_allocate(w, epsilon = 0.5, ctrl = "cisplatin") %>% 
-  train_rlearner(., X, y_complete, var = "trametinib", ctrl = "cisplatin")
-```
-
-The performance of the rlearner is far from optimal. I start troubleshooting. 
-
-```{r}
-out$rlasso_est %>% hist()
-```
-
-
-
-```{r}
 y_complete %>% 
   ggplot(aes(trametinib, cisplatin)) + 
   geom_point() + 
   theme_classic() + 
   labs(title = "Association of Cisplatin and Trametinib response")
-```
-
-
-
-```{r}
-set.seed(432)
-library(rlearner)
-n = 100; p = 10
-
-x = matrix(rnorm(n*p), n, p)
-w = rbinom(n, 1, 0.5)
-#w = cbind(w, c(1, rep(0, times = n-1)))
-y = pmax(x[,1], 0) * w + x[,2] + pmin(x[,3], 0) + rnorm(n)
-
-rlasso_fit = rlasso(x, w, y)
-rlasso_est = predict(rlasso_fit, x)
-
-rboost_fit = rboost(x, w, y)
-rboost_est = predict(rboost_fit, x)
-```
-
-
-```{r}
-library(rlearner)
-library(zeallot)
-
-# draw a sample of n observations from a simulation
-data = toy_data_simulation(n) 
-# data$x is a numeric matrix of covariates (each column having a name)
-# data$w is a factor vector where the first level indicates "treatment" and the second "control"
-# data$y is a numeric vector of outcomes
-
-# Specify the machine learning models and 
-# hyperparameters to be cross-validated over.
-# This code specifies the use of elastic net
-model_specs = list(
-	glmnet = list(
-	    tune_grid = expand.grid(
-	       alpha=c(0,0.5,1),
-	       lambda=exp(seq(-5,2,0.2))),
-	    extra_args = list())
-)
-
-r_fit = rlearner_cv(data$x, data$w, data$y, tau_model_specs=model_specs)
-tau_hat = predict(r_fit, data$x)
-
-print(paste("MSE of tau estimate:", mean((data$tau - tau_hat)^2)))
 ```
 

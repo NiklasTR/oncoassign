@@ -1,0 +1,131 @@
+---
+title: "Data Export"
+author: "Niklas Rindtorff"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(rlearner)
+library(randomizr)
+library(here)
+library(umap)
+```
+
+# Dataset joining
+
+First, I create a harmonized group of datasets. 
+
+```{r}
+# I define my covariate data
+X_raw <- mutation %>% mutate(cosmic_id = as.character(cosmic_id)) %>% 
+ inner_join(expression %>% mutate(cosmic_id = as.character(cosmic_id))) %>% # flagged
+  inner_join(cnv %>% mutate(cosmic_id = as.character(cosmic_id))) %>%  # flagged
+  inner_join(covariates %>% mutate(cosmic_id = as.character(cosmic_id)))
+
+
+# I filter the dataset so the data is complete for every unit
+y_complete <- crxg_map_imputed %>% 
+  semi_join(X_raw, by = "cosmic_id") %>% 
+  semi_join(allocation, by = "cosmic_id")
+
+X_raw <- X_raw %>% 
+  semi_join(crxg_map_imputed, by = "cosmic_id") %>% 
+  semi_join(allocation, by = "cosmic_id")
+
+w <- allocation %>% 
+  semi_join(X_raw, by = "cosmic_id") %>% 
+  semi_join(crxg_map_imputed, by = "cosmic_id")
+```
+
+I write the allocation and response matrix
+
+```{r}
+write_csv(y_complete, here("data/y_complete.csv"))
+write_csv(w, here("data/w.csv"))
+```
+
+
+# Dimensionality reduction of covariates
+
+I reduce the dimensionality of my features X
+
+```{r}
+umap.feature_extraction <- umap.defaults
+umap.feature_extraction$n_components <- 20
+
+X_umap <- X_raw %>%
+  dplyr::select(-cosmic_id) %>% 
+  mutate_all(funs(as.numeric)) %>%
+  umap::umap(config = umap.feature_extraction)
+```
+
+```{r}
+X <- X_umap$layout %>% 
+  cbind(cosmic_id = X_raw$cosmic_id) %>%
+  as_tibble()
+```
+
+```{r}
+X %>% write_csv(here("data/X_umap.csv"))
+```
+
+# Visualization of reduced feature set
+
+```{r}
+df <- X_umap$layout[,c(1,20)] %>%
+  cbind(cosmic_id = X$cosmic_id) %>%
+  as_tibble() %>%
+  mutate(V1 = as.numeric(V1),
+         V2 = as.numeric(V2))
+
+df%>%
+  ggplot(aes(V1, V2)) + 
+  geom_point() + 
+  theme_classic() + 
+  theme(legend.position = "none")
+```
+
+```{r}
+X_umap$layout %>% t() %>%
+  pheatmap::pheatmap(cluster_rows = TRUE, cluster_cols = TRUE,
+                     filename = "umap.pdf", width = 4, height = 3)
+```
+
+
+# Regret definition for contextual bandits
+
+```{r}
+y_regret <- y_complete %>% 
+  gather(treatment, response, -cosmic_id) %>% 
+  group_by(cosmic_id) %>% 
+  mutate(min = min(response)) %>% 
+  mutate(regret = (response - min)*-1) %>% 
+  dplyr::select(treatment, regret, cosmic_id) %>% 
+  spread(treatment, regret)  %>% 
+  arrange(cosmic_id)
+
+y_regret %>% 
+  write_csv(here("data/y_regret.csv"))
+
+y_regret %>% 
+  gather(treatment, regret, -cosmic_id) %>% 
+  nest(-cosmic_id) %>% 
+  mutate(new = map(data, ~ .x %>% arrange((regret)) %>% cbind(.,index = c(1:7)))) %>% 
+  unnest(new) %>% 
+  dplyr::select(cosmic_id, treatment, index) %>% 
+  spread(treatment, index)  %>% 
+  arrange(cosmic_id) %>% 
+  write_csv(here("data/y_regret_rank.csv"))
+
+# Defining percent rankings for regret calculation
+perc.rank <- function(x) 1-(trunc(rank(x))/length(x))
+
+y_complete %>% 
+  mutate_at(vars(everything(), -cosmic_id), funs(perc.rank)) %>% 
+  write_csv(here("data/y_regret_percentile.csv"))
+```
