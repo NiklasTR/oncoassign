@@ -1,5 +1,5 @@
 ---
-title: "1_tidy_cancerrxgene_data"
+title: "Data scaling and imputation, Part 1"
 author: "Niklas Rindtorff"
 date: "3/5/2018"
 output: html_document

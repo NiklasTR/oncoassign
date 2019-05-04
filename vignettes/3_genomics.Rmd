@@ -1,5 +1,5 @@
 ---
-title: "subtype_specific_anaysis"
+title: "Genomic data preparation"
 author: "Niklas Rindtorff"
 date: "5/13/2018"
 output: html_document
@@ -24,12 +24,6 @@ library(stringr)
 library(here)
 ```
 
-# Import data
-
-```{r}
-load(here("data/crxg.Rdata"))
-load(here("data/crxg_map.Rdata"))
-```
 
 # Read molecular data
 
@@ -45,6 +39,8 @@ expression <- read_delim(here("local_data/sanger1018_brainarray_ensemblgene_rma.
   rownames_to_column("cosmic_id") %>% 
   .[-1,]
 
+save(expression, file = here("data/expression.Rdata"))
+write_csv(expression, path = here("data/expression.csv"))
 ```
 
 
@@ -59,24 +55,21 @@ mutation <- read_delim("local_data/CellLines_CG_BEMs/PANCAN_SEQ_BEM.txt",
   magrittr::set_colnames(.[1,] %>% unlist() %>% as.character()) %>% 
   rownames_to_column("cosmic_id") %>% 
   .[-1,]
+
+save(mutation, file = here("data/mutation.Rdata"))
+write_csv(mutation, path = here("data/mutation.csv"))
 ```
 
 
 ```{r, warning=FALSE, message=FALSE}
 cnv <- read_delim(here("local_data/CellLine_CNV_BEMs/PANCAN_CNA_BEM.rdata.txt"), 
     "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
-  as.matrix() %>%
-  t() %>% 
-  as.data.frame() %>% 
-  magrittr::set_colnames(.[1,] %>% unlist() %>% as.character()) %>% 
-  rownames_to_column("cosmic_id") %>% 
-  .[-1,]
+  janitor::clean_names() %>% 
+  dplyr::select(cosmic_id = x1, everything())
+
+save(cnv, file = here("data/cnv.Rdata"))
+write_csv(cnv, path = here("data/cnv.csv"))
 ```
 
 
-```{r}
-#tmp <- left_join(expression, mutation, by = "cosmic_id")
-
-#tmp %>% naniar::vis_miss(warn_large_data = FALSE)
-```
 

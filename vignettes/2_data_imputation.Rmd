@@ -1,5 +1,5 @@
 ---
-title: "pan_cancer_analysis"
+title: "Data scaling and imputation, Part 2"
 author: "Niklas Rindtorff"
 date: "5/13/2018"
 output: html_document
@@ -20,30 +20,13 @@ library(here)
 library(viridis)
 ```
 
-#Load data
+# Load data
 ```{r}
 load(here("data/crxg.Rdata"))
 ```
 
 
-#Correlation pan-cancer
-
-I show the null-distribution of drug correlations for all drugs and cell lines available.
-
-```{r}
-crxgr_pan <- crxg %>% dplyr::select(drug_id, cosmic_id, rob_z) %>%
-  filter(!is.na(drug_id), !is.na(cosmic_id)) %>%
-  spread(drug_id, rob_z) %>% 
-  dplyr::select(-cosmic_id)%>%
-  corrr::correlate(method = "spearman", use = "pairwise.complete.obs") %>%
-  corrr::stretch()
-
-crxgr_pan %>%
-  drop_na() %>%
-  ggplot(aes(r)) + 
-  geom_density() + 
-  theme_classic()
-```
+# Scaling drug response data
 
 ```{r}
 crxg_map <- crxg %>% dplyr::select(drug_id, cosmic_id, ln_ic50) %>%
