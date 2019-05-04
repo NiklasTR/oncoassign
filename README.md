@@ -16,13 +16,13 @@ Author contributions:
   * prepared dataset for contextual bandit experiments
   * prepared BMI707 project proposal, update and report
 * Alexander D'Amour: 
- * mentorship and advice during the study
+  * mentorship and advice during the study
 * Ming Yu Lu: 
- * implemented and executed contextual bandit experiments
- * prepared BMI707 project update and report
+  * implemented and executed contextual bandit experiments
+  * prepared BMI707 project update and report
 * Huahua Zheng: 
- * prepared dataset for contextual bandit experiments
- * prepared BMI707 project update and report
+  * prepared dataset for contextual bandit experiments
+  * prepared BMI707 project update and report
 * Nisarg Patel: 
- * advice during regret function design and feature representation
- * prepared BMI707 project update, poster and report
+  * advice during regret function design and feature representation
+  * prepared BMI707 project update, poster and report
