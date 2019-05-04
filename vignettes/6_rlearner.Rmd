@@ -37,7 +37,6 @@ I source a set of functions, I will aggregate all of this in a package later.
 list.files(here("R"), full.names = TRUE) %>% lapply(source)
 ```
 
-
 Similar to many causal inference problems, we have three datasets: unit covariates *X*, assignment *w* and responses *y*. 
 
 
@@ -215,120 +214,21 @@ gamma_count_df %>%
 
 After defining a function to perform weighted reassignments, I have to generate result vectors based on a given reassignment. The function name is *create_y*. 
 
-Now 
+Now I have a first training run of the R-Learner, with a 20% test holdout
 
 ```{r}
-feed_rlearner <- function(allocation_in, features, response, var, ctrl = "cisplatin", split = 0.8){
-  # I create a list to organize elements in the function
-list <- list()
-
-list$var = var
-list$ctrl = ctrl 
-
-var_q <- sym(var)
-ctrl_q <- sym(ctrl)
-
-list$df <- allocation_in$re_allocation %>% 
-  mutate(cosmic_id = as.character(cosmic_id)) %>%
-  semi_join(response, by = "cosmic_id") %>%
-  filter(re_assignment == var |  re_assignment == ctrl) %>% 
-  # In our current scenario, we can only consider cases that were included in either the treatment of interest of ctrl arm
-  filter(assignment == var |  assignment == ctrl) %>% 
-  mutate(logical = if_else(re_assignment == ctrl, 0, 1),
-         cosmic_id = as.character(cosmic_id))
-
-list$x <- features %>% 
-  mutate(cosmic_id = as.character(cosmic_id)) %>%
-  semi_join(list$df,  by = "cosmic_id") %>%
-  dplyr::select(-cosmic_id) %>%
-  mutate_all(funs(as.character)) %>%
-  mutate_all(funs(as.numeric)) %>%
-  as.matrix()
-
-# getting df into shape
-
-list$df <- list$df %>% 
-  semi_join(features %>% 
-    mutate(cosmic_id = as.character(cosmic_id)) %>%
-    semi_join(list$df,  by = "cosmic_id"), 
-  by = "cosmic_id")
-
-list$w <- list$df$logical
-
-list$y <- response %>%
-  mutate(cosmic_id = as.character(cosmic_id)) %>%
-  left_join(list$df ,.,  by = "cosmic_id") %>%
-  dplyr::select_(var, ctrl, "cosmic_id", "re_assignment") %>% 
-  mutate(y = if_else(re_assignment == ctrl, !!ctrl_q, !!var_q)) %>% 
-  .$y
-
-
-list$p <- list$df %>% mutate(initial_logical = if_else(re_assignment == ctrl, 0, 1)) %>% 
-  mutate(p_hat = if_else(initial_logical == 1, 
-                         1-(allocation_in$cross %>% filter(assignment == var) %>% .$cross_out), 
-                         allocation_in$cross %>% filter(assignment == var) %>% .$cross_in)) %>% 
-  .$p_hat
-
-list$index <- c(1:length(list$w)) %>% sample(., size = round(length(.)*split, 1))
-
-return(list)
-}
-
-
-train_rlearner <- function(list, estimate_phat = TRUE){
-  if(estimate_phat == TRUE){
-  # running the rlearner
-list$rlasso_fit = rlasso(list$x[list$index,], list$w[list$index], list$y[list$index])
-list$rlasso_est = predict(list$rlasso_fit, list$x[-list$index,])
-
-list$rboost_fit = rboost(list$x[list$index,], list$w[list$index], list$y[list$index])
-list$rboost_est = predict(list$rboost_fit, list$x[-list$index,])
-
-return(list)
-} else if(estimate_phat == FALSE){
-  # running the rlearner
-list$rlasso_fit = rlasso(list$x[list$index,], list$w[list$index], list$y[list$index], p_hat = list$p[list$index])
-list$rlasso_est = predict(list$rlasso_fit, list$x[-list$index,])
-
-list$rboost_fit = rboost(list$x[list$index,], list$w[list$index], list$y[list$index], p_hat = list$p[list$index])
-list$rboost_est = predict(list$rboost_fit, list$x[-list$index,])
-
-return(list)
-}
-}
-
-
 out <- re_allocate(w, epsilon = 0, gamma = 0.6, omega = 0.25, ctrl = "cisplatin") %>% 
   feed_rlearner(., X, y_complete, var = "afatinib", ctrl = "cisplatin") %>% 
   train_rlearner(., estimate_phat = FALSE)
-
 ```
 
 
-* grid search omega and gamma
-
-Measuring the PEHE for treatment effects.
+# Measuring the PEHE for treatment effects.
 
 Different from the initial proposal, I did not modify the PEHE function for a reference-free context. Instead, as described above, I decided to pick a reference treatment, cisplatin.
+I showcase the *estimate_pehe* function below on the first training run.
 
 ```{r}
-estimate_pehe <- function(rlearner_model, response = y_complete){
-  var_q <- sym(rlearner_model$var)
-  ctrl_q <- sym(rlearner_model$ctrl)
-  
-  rlearner_model$df[-rlearner_model$index,] %>% 
-    left_join(response, by = "cosmic_id") %>%
-    dplyr::select(cosmic_id, !!var_q, !!ctrl_q, assignment, re_assignment, logical) %>%
-    mutate(tau = !!var_q-!!ctrl_q) %>% 
-    mutate(tau_hat_lasso = rlearner_model$rlasso_est) %>% 
-    mutate(tau_hat_boost = rlearner_model$rboost_est) %>% 
-    mutate(pehe_lasso = (tau_hat_lasso - tau)^2,
-           pehe_boost = (tau_hat_boost - tau)^2) %>% 
-    mutate(var = rlearner_model$var,
-           ctrl = rlearner_model$ctrl) %>%
-    return()
-}
-
 estimate_pehe(out) %>% 
   group_by(re_assignment, var) %>% 
   summarise(pehe_lasso_sd = sd(pehe_lasso),
@@ -350,21 +250,6 @@ estimate_pehe(out) %>%
 
 
 ```{r}
-iterate_rlearner <- function(gamma_omega, var_in){
-  params <- gamma_omega %>% str_split(pattern = "_") %>% unlist() %>% as.numeric()
-  gamma <- params[1]
-  omega <- params[2]
-  
-  result <- re_allocate(w, epsilon = 0, gamma = gamma, omega = omega, ctrl = "cisplatin") %>% 
-  feed_rlearner(., X, y_complete, var = var_in, ctrl = "cisplatin") %>% 
-    train_rlearner(., estimate_phat = FALSE) 
-  
-  result %>%
-    saveRDS(here(paste0("data/", gamma_omega, "_", var_in, "_", Sys.time(), ".Rds")))
-  
-  return(result)
-}
-
 rlearner_grid <- expand.grid(gamma = rep(seq(0,1, 0.05), each = 1),
                                 omega = rep(seq(0,1, 0.05), each = 1),
                                 drug = w[,-1] %>% colnames()) %>% 
@@ -446,25 +331,9 @@ df %>%
 
 What is the value of this CI? 
 
-I calculate the baseline regret that would exist if cell lines would be allocated by their initial therpeutic protocol only.
+I calculate the baseline regret that would exist if cell lines would be allocated by their initial therpeutic protocol only. For the rest of this publication, I refer to the standard regret as the "baseline regret".
 
 ```{r}
-return_standard_regret <- function(var, ctrl = "cisplatin", response = y_complete){
-
-var_q <- sym(var)
-ctrl_q <- sym(ctrl)
-
-df <- re_allocate(w, epsilon = 0, gamma = 0, omega = 0, ctrl = "cisplatin") %>% 
-  feed_rlearner(., X, y_complete, var = var, ctrl = ctrl) %>% 
-  .$df %>% 
-  left_join(response, by = "cosmic_id") %>%
-    dplyr::select(cosmic_id, !!var_q, !!ctrl_q, assignment, re_assignment, logical) %>%
-    mutate(tau = !!var_q-!!ctrl_q) %>% 
-  mutate(regret = if_else((logical == 0 & tau < 0) | (logical == 1 & tau > 0), tau, 0))
-
-sum(abs(df$regret)) %>% return()
-}
-
 standard_regret <- tibble(drug = rlearner_regret_umap$drug %>% unique()) %>% 
   mutate(standard_regret = map(drug, ~ return_standard_regret(.x))) %>% 
   unnest(standard_regret)
@@ -475,22 +344,6 @@ standard_regret
 I also create a function to measure the protocol regret. 
 
 ```{r}
-return_protocol_regret <- function(rlearner_model, response = y_complete){
-
-var_q <- sym(rlearner_model$var)
-ctrl_q <- sym(rlearner_model$ctrl)
-
-df <- rlearner_model$df[rlearner_model$index,] %>% 
-    left_join(response, by = "cosmic_id") %>%
-    dplyr::select(cosmic_id, !!var_q, !!ctrl_q, assignment, re_assignment, logical) %>%
-    mutate(tau = !!var_q-!!ctrl_q) %>% 
-    mutate(var = rlearner_model$var,
-           ctrl = rlearner_model$ctrl) %>%
-    mutate(regret = if_else((logical == 0 & tau < 0) | (logical == 1 & tau > 0), tau, 0))
-
-sum(abs(df$regret)) %>% return()
-}
-
 protocol_regret <- rlearner_grid_result_pehe_umap %>% 
   mutate(protocol_regret = map(rlearner, ~ .x %>% return_protocol_regret)) %>% 
   dplyr::select(name, protocol_regret) %>% 
