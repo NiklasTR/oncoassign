@@ -82,3 +82,4 @@ local_data/Screened_Compounds.xlsx
 local_data/v17.3_fitted_dose_response.xlsx
 local_data/WES_variants.xlsx
 *.zip
+*.Rds
