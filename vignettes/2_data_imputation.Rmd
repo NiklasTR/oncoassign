@@ -205,6 +205,8 @@ types_of_interest <- (crxg %>%
     dplyr::select(cosmic_id, cancer_type ) %>% 
     distinct() %>% count(cancer_type) %>% arrange(desc(n)) %>% filter(n > 30) %>% .$cancer_type)
 
+saveRDS(types_of_interest, here("data/types_of_interest.Rdata"))
+
 
 anno_col  = crxg %>% 
   drop_na() %>%
