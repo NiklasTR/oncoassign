@@ -1,4 +1,4 @@
-# Proposing a Change to the Assignment Mechanism in Precision Oncology Programs to enable Causal Inference
+# Proposing a Change to the Assignment Mechanism in Precision Oncology Programs
 
 The repository contains an analysis of the drug sensitivities in cancer dataset by Iorio et al. in two highly related settings: 
 

@@ -18,6 +18,18 @@ library(umap)
 
 # Dataset joining
 
+```{r}
+allocation <- read_csv(here("data/allocation.csv")) %>% mutate(cosmic_id = as.character(cosmic_id))
+covariates <- read_csv(here("data/covariates.csv")) %>% mutate(cosmic_id = as.character(cosmic_id))
+
+load(here("data/crxg_map_imputed.Rdata"))
+load(here("data/mutation.Rdata"))
+load(here("data/expression.Rdata"))
+load(here("data/cnv.Rdata"))
+
+```
+
+
 First, I create a harmonized group of datasets. 
 
 ```{r}
@@ -76,22 +88,59 @@ X %>% write_csv(here("data/X_umap.csv"))
 
 # Visualization of reduced feature set
 
-```{r}
-df <- X_umap$layout[,c(1,20)] %>%
-  cbind(cosmic_id = X$cosmic_id) %>%
-  as_tibble() %>%
-  mutate(V1 = as.numeric(V1),
-         V2 = as.numeric(V2))
+First I look at the link between drug response and genomic feautures.
 
-df%>%
-  ggplot(aes(V1, V2)) + 
-  geom_point() + 
-  theme_classic() + 
-  theme(legend.position = "none")
+```{r}
+y_complete %>% gather(drug, response, -cosmic_id) %>% 
+  left_join(X, by = "cosmic_id") %>%
+  ggplot(aes(V1, V2, color = response)) + 
+  geom_point(alpha = 0.5) + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  facet_grid(~ drug) + 
+  scale_color_viridis_c() + 
+  labs(title = "UMAP and Drug Response Scores",
+       x = "UMAP 1",
+       y = "UMAP 2",
+       color = "Response Score") + 
+  theme(legend.position = "right") + 
+  ggsave("umap_drug.pdf", width = 22, height = 4)
 ```
 
 ```{r}
-X_umap$layout %>% t() %>%
+subtypes_of_interest <- covariates %>% 
+    dplyr::select(-msi, -suspension, -semi_adherent, -adherent, -medium) %>% 
+    gather(tissue_type, logical, -cosmic_id) %>% 
+    filter(logical == 1) %>% count(tissue_type) %>% arrange(desc(n)) %>% filter(n > 30) %>% .$tissue_type
+
+df <- X %>% left_join(covariates %>% 
+  dplyr::select(-msi, -suspension, -semi_adherent, -adherent, -medium) %>% 
+  gather(tissue_type, logical, -cosmic_id) %>% 
+  filter(logical == 1) %>% 
+  filter(tissue_type %in% subtypes_of_interest) %>% mutate(cosmic_id = cosmic_id %>% as.numeric), by = "cosmic_id") %>% 
+  dplyr::select(-logical)
+
+df %>% 
+  drop_na() %>%
+  ggplot(aes(V1, V2, color = tissue_type)) + 
+  geom_point(alpha = 0.5) + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  scale_color_brewer(type = "qual", palette = 3) + 
+  labs(title = "UMAP and Tissue Type",
+       x = "UMAP 1",
+       y = "UMAP 2", 
+       color = "Tissue Types") + 
+  theme(legend.position = "right") + 
+  ggsave("umap_tissue.pdf", width = 6, height = 4)
+```
+
+
+
+```{r}
+X %>% 
+  dplyr::select(-cosmic_id) %>% 
+  t() %>%
   pheatmap::pheatmap(cluster_rows = TRUE, cluster_cols = TRUE,
                      filename = "umap.pdf", width = 4, height = 3)
 ```

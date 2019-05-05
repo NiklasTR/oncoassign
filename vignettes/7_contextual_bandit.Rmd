@@ -10,11 +10,324 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 library(tidyverse)
 library(googlesheets)
+library(googledrive)
 ```
 
 We are running the the contextual bandit showdown repository 
 
 ```{r}
+bandit_gs <- gs_title("result")
+bandit_df <- gs_read(bandit_gs)
+```
 
+I clean up the table
+
+```{r}
+# UniformSampling('Uniform Sampling', hparams),
+# UniformSampling('Uniform Sampling 2', hparams),
+# #FixedPolicySampling('fixed1', [0.75, 0.25], hparams),
+# #FixedPolicySampling('fixed2', [0.25, 0.75], hparams),
+# PosteriorBNNSampling('RMS', hparams_rms, 'RMSProp'),
+# PosteriorBNNSampling('Dropout', hparams_dropout, 'RMSProp'),
+# PosteriorBNNSampling('BBB', hparams_bbb, 'Variational'),
+# NeuralLinearPosteriorSampling('NeuralLinear', hparams_nlinear),
+# NeuralLinearPosteriorSampling('NeuralLinear2', hparams_nlinear2),
+# LinearFullPosteriorSampling('LinFullPost', hparams_linear),
+# BootstrappedBNNSampling('BootRMS', hparams_rms),
+# ParameterNoiseSampling('ParamNoise', hparams_pnoise),
+# PosteriorBNNSampling('BBAlphaDiv', hparams_alpha_div, 'AlphaDiv'),
+# PosteriorBNNSampling('MultitaskGP', hparams_gp, 'GP'),
+# ClinicalGuideLine('Clinical Guideline ', hparams)
+
+bandit_df_t <- bandit_df %>% 
+  gather(key, value, -X1) %>% 
+  separate(key, c("replicate", "regret")) %>% 
+  mutate(replicate = substr(replicate, 1,1) %>% as.numeric()) %>% 
+  rename(bandit = X1) %>% 
+  mutate(bandit = case_when(bandit == "NeuralLinear2" ~ "NeuralLinear",
+                            bandit == "Uniform Sampling 2" ~ "Uniform Sampling",
+                            TRUE ~ bandit)) %>% 
+  mutate(class = case_when(bandit %in% c("RMS", "Dropout", "BBB", "BBAlphaDiv") ~ "Posterior BNN Sampling",
+                           bandit %in% c("NeuralLinear") ~ "Neural-Linear Posterior Sampling",
+                           bandit %in% c("Uniform Sampling") ~ "Uniform Sampling",
+                           bandit == "LinFullPost" ~ "Exact Bayesian linear regression Sampling",
+                           bandit == "BootRMS" ~ "Bootstrapped BNN Sampling",
+                           bandit == "Clincial Guideline" ~ "Clinical Guidelines",
+                           bandit == "ParamNoise" ~ "Parameter Noise Sampling",
+                           bandit == "MultitaskGP" ~ "Gaussian Process"))
+```
+
+I plot first results
+
+```{r}
+order <- bandit_df_t %>% 
+  group_by(regret, bandit, regret) %>% 
+  summarise(mean = mean(value)) %>% 
+  group_by(regret) %>% 
+  mutate(mean = scale(mean)) %>%
+  group_by(bandit) %>% 
+  summarise(mean = mean(mean)) %>% 
+  arrange((mean)) %>% 
+  filter(bandit != "Uniform Sampling",
+         bandit != "Clincial Guideline") %>%
+  .$bandit
+
+order <- c("Uniform Sampling", "Clincial Guideline", order)
+
+
+bandit_df_t %>% 
+  mutate(bandit = factor(bandit, levels = order)) %>%
+  filter(regret == "lnic50") %>%
+  ggplot(aes(bandit, value, color = class)) + 
+  geom_jitter(width = 0.1, size = 4) + 
+  coord_flip() + 
+  labs(title = "Reward: Response Score",
+       subtitle = "Difference to Response Score of ideal treatment",
+       color = "Algorithm Class",
+       y = "Reward",
+       x = "Algorithm") + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual", palette = 3) + 
+  ggsave("bandit_regret_classic.pdf", width = 7, height = 6)
+  
+```
+
+
+```{r}
+bandit_df_t %>% 
+  mutate(bandit = factor(bandit, levels = order)) %>%
+  filter(regret == "rank") %>%
+  ggplot(aes(bandit, value, color = class)) + 
+  geom_jitter(width = 0.1, size = 4) + 
+  coord_flip() + 
+  labs(title = "Reward: Rank",
+       subtitle = "Rank of treatment from lowest (0) to highest (7) Response Score",
+       color = "Algorithm Class",
+       y = "Reward",
+       x = "Algorithm") + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual", palette = 3) + 
+  #geom_hline(yintercept = 896*7) +
+  ggsave("bandit_regret_rank.pdf", width = 7, height = 6)
+```
+
+```{r}
+bandit_df_t %>% 
+  mutate(bandit = factor(bandit, levels = order)) %>%
+  filter(regret == "percentage") %>%
+  ggplot(aes(bandit, value, color = class)) + 
+  geom_jitter(width = 0.1, size = 4) + 
+  coord_flip() + 
+  labs(title = "Reward: Percentile",
+       subtitle = "Percentile of Response Score distribution",
+       color = "Algorithm Class",
+       y = "Reward",
+       x = "Algorithm") + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual", palette = 3) + 
+  #geom_hline(yintercept = 896*7) +
+  ggsave("bandit_regret_percent.pdf", width = 7, height = 6)
+```
+
+# Visualize agent choices
+
+```{r, message=FALSE}
+action_df <- list.files(here("data/agent_actions"), pattern = "action_dis", full.names = TRUE) %>% 
+    map_df(~ read_csv(.x) %>% mutate(path = .x)  %>% dplyr::select(-c(2))) %>% 
+    mutate(step = X1 + 1) %>% 
+  dplyr::select(-X1)
+```
+
+```{r}
+order[2] <- "Clinical Guideline"
+
+anno_action <- tibble(drug = c("afatinib",	"cisplatin",	"dabrafenib",	"olaparib",	"palbociclib",	"trametinib",	"vismodegib"),
+       action = c(0:6),
+       type = "alphabetical")
+
+action_df_f <- action_df %>% 
+  #filter(path == "/home/niklas/oncoassign/data/agent_actions/action_dis_0.csv") %>% 
+  gather(bandit, action, -step, -path) %>% 
+  mutate(bandit = case_when(bandit == "NeuralLinear2" ~ "NeuralLinear",
+                            bandit == "Uniform Sampling 2" ~ "Uniform Sampling",
+                            TRUE ~ bandit)) %>% 
+  mutate(class = case_when(bandit %in% c("RMS", "Dropout", "BBB", "BBAlphaDiv") ~ "Posterior BNN Sampling",
+                           bandit %in% c("NeuralLinear") ~ "Neural-Linear Posterior Sampling",
+                           bandit %in% c("Uniform Sampling") ~ "Uniform Sampling",
+                           bandit == "LinFullPost" ~ "Exact Bayesian linear regression Sampling",
+                           bandit == "BootRMS" ~ "Bootstrapped BNN Sampling",
+                           bandit == "Clincial Guideline" ~ "Clinical Guidelines",
+                           bandit == "ParamNoise" ~ "Parameter Noise Sampling",
+                           bandit == "MultitaskGP" ~ "Gaussian Process")) %>% 
+  mutate(type = "alphabetical") %>%
+  left_join(anno_action, by = c("action", "type"))
+  
+  
+```
+
+
+```{r}
+input <- read_csv(here("data/bandit_input/final_df.csv"))
+
+binarize <- function(x){if_else(x == 0, 1, 0)}
+
+optimal <- input %>% select(contains("y")) %>% 
+  mutate_all(binarize) %>% 
+  cbind(., step = c(1:nrow(.))) %>% 
+  gather(drug, logical, -step) %>% 
+  filter(logical == 1) %>% 
+  arrange(step) %>% 
+  separate(drug, c("drug", "y")) %>% 
+  dplyr::select(-y, -logical) %>%
+  mutate(path = "external",
+         class = "Ground Truth",
+         bandit = "Optimal Policy",
+         type = "alphabetical",
+         action = NA)
+
+ 
+```
+
+
+
+```{r}
+order[12] <- "Optimal Policy"
+
+action_df_f %>% 
+  filter(path == "/home/niklas/oncoassign/data/agent_actions/action_dis_0.csv") %>% 
+  rbind(optimal,.) %>%
+  mutate(bandit = factor(bandit, levels = order)) %>% 
+  ggplot(aes(step, drug)) + 
+  geom_tile() + 
+  facet_wrap(~ bandit) + 
+  theme_bw() + 
+  labs(x = "Step",
+       y = "Treatment choice") + 
+   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggsave("treatment_choice_score.pdf", width = 8, height = 5)
+  
+```
+
+
+
+```{r}
+reward <- input %>% select(contains("y")) %>%
+  cbind(., step = c(1:nrow(.))) %>% 
+  gather(drug, reward, -step) %>% 
+  arrange(step) %>% 
+  separate(drug, c("drug", "y")) %>% 
+  dplyr::select(-y)
+  
+```
+
+
+```{r}
+action_df_f %>% 
+  filter(path == "/home/niklas/oncoassign/data/agent_actions/action_dis_0.csv") %>% 
+  rbind(optimal,.) %>%
+  mutate(bandit = factor(bandit, levels = order)) %>%
+  left_join(reward) %>% 
+  group_by(bandit, step) %>% 
+  summarise(avg_reward = mean(reward)) %>%
+  group_by(bandit) %>%
+  mutate(cum_reward = cumsum(avg_reward)) %>% 
+  ggplot(aes(step, cum_reward, color = bandit)) + 
+  geom_line(size = 2) + 
+  labs(title = "Reward: Response Score",
+       subtitle = "Difference to Response Score of ideal treatment",
+       color = "Algorithm Class",
+       y = "Reward",
+       x = "Step") + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual", palette = 3) + 
+  ggsave("bandit_regret_time_score.pdf", width = 7, height = 6)
+```
+
+# Reward without genomic features
+
+
+```{r}
+bandit_clinic_df_t <- readxl::read_xlsx(here("data/rewards/clinic_only.xlsx")) %>%
+  janitor::clean_names() %>%
+  gather(key, value, -x1) %>% 
+  separate(key, c("restriction", "regret")) %>% 
+  separate(regret, c("regret", "replicate"), -1) %>% 
+  rename(bandit = x1) %>% 
+  mutate(bandit = case_when(bandit == "NeuralLinear2" ~ "NeuralLinear",
+                            bandit == "Uniform Sampling 2" ~ "Uniform Sampling",
+                            TRUE ~ bandit),
+         regret = case_when(regret == "base" ~ "lnic50",
+                            regret == "rank" ~ "rank",
+                            regret == "percentile" ~ "percentage")) %>% 
+  mutate(class = case_when(bandit %in% c("RMS", "Dropout", "BBB", "BBAlphaDiv") ~ "Posterior BNN Sampling",
+                           bandit %in% c("NeuralLinear") ~ "Neural-Linear Posterior Sampling",
+                           bandit %in% c("Uniform Sampling") ~ "Uniform Sampling",
+                           bandit == "LinFullPost" ~ "Exact Bayesian linear regression Sampling",
+                           bandit == "BootRMS" ~ "Bootstrapped BNN Sampling",
+                           bandit == "Clincial Guideline" ~ "Clinical Guidelines",
+                           bandit == "ParamNoise" ~ "Parameter Noise Sampling",
+                           bandit == "MultitaskGP" ~ "Gaussian Process"))
+```
+
+
+```{r}
+bandit_clinic_df_t %>% 
+  mutate(restriction = "Therapeutic Protocol") %>%
+  rbind(bandit_df_t %>% mutate(restriction = "Genomics + Therapeutic Protocol")) %>%
+  mutate(bandit = factor(bandit, levels = order)) %>%
+  filter(regret == "lnic50") %>%
+  drop_na() %>%
+  ggplot(aes(bandit, value, color = restriction)) + 
+  geom_jitter(width = 0.1, size = 4) + 
+  coord_flip() + 
+  labs(title = "Available State Information effects Reward",
+       subtitle = "Difference to Response Score of ideal treatment",
+       color = "State Information",
+       y = "Reward",
+       x = "Algorithm") + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual", palette = 1) + 
+  ggsave("bandit_regret_classic_clinic.pdf", width = 7, height = 6)
+```
+
+```{r}
+bandit_clinic_df_t %>% 
+  mutate(restriction = "Therapeutic Protocol") %>%
+  rbind(bandit_df_t %>% mutate(restriction = "Genomics + Therapeutic Protocol")) %>%
+  mutate(bandit = factor(bandit, levels = order)) %>%
+  filter(regret == "rank") %>%
+  drop_na() %>%
+  ggplot(aes(bandit, value, color = restriction)) + 
+  geom_jitter(width = 0.1, size = 4) + 
+  coord_flip() + 
+  labs(title = "Available State Information effects Reward",
+       subtitle = "Rank of treatment from lowest (0) to highest (7) Response Score",
+       color = "State Information",
+       y = "Reward",
+       x = "Algorithm") + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual", palette = 1) + 
+  ggsave("bandit_regret_rank_clinic.pdf", width = 7, height = 6)
+```
+
+
+```{r}
+bandit_clinic_df_t %>% 
+  mutate(restriction = "Therapeutic Protocol") %>%
+  rbind(bandit_df_t %>% mutate(restriction = "Genomics + Therapeutic Protocol")) %>%
+  mutate(bandit = factor(bandit, levels = order)) %>%
+  filter(regret == "percentage") %>%
+  drop_na() %>%
+  ggplot(aes(bandit, value, color = restriction)) + 
+  geom_jitter(width = 0.1, size = 4) + 
+  coord_flip() + 
+  labs(title = "Available State Information effects Reward",
+       subtitle = "Percentile of Response Score distribution",
+       color = "State Information",
+       y = "Reward",
+       x = "Algorithm") + 
+  theme_classic() + 
+  scale_color_brewer(type = "qual", palette = 1) + 
+  ggsave("bandit_regret_percentage_clinic.pdf", width = 7, height = 6)
 ```
 
