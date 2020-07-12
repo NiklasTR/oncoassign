@@ -5,6 +5,9 @@ The repository contains an analysis of the drug sensitivities in cancer dataset 
 * enabling Causal Inference in Precision Oncology programs 
 * optimizing the Assignment Mechanism in Precision Oncology programs using contextual bandits
 
+
+## Authors
+
 The work has been submitted as course work for CS282R (Harvard and Google Brain) and BMI707 (Harvard Medical School).
 
 Author contributions: 
